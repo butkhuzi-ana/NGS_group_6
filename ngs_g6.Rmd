@@ -1,0 +1,6 @@
+# Project
+```{r}
+data <- readRDS("/opt/omicsdata/datasets/SRP042620.rds")
+data$sra.sample_attributes
+```
+

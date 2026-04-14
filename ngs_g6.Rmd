@@ -1,7 +1,90 @@
 # Project
+
+# Introduction
+In this analysis we will explore gene expression analysis among TNBC and ER+ genes using Bioconductor packages.
+
+Load the packages [research on where the packages came from]
+
 ```{r}
-data <- readRDS("/opt/omicsdata/datasets/SRP042620.rds")
-data$sra.sample_attributes
+
+library(omicsdata)
+library(limma)
+library(EDASeq)
+library(edgeR)
+library(dplyr)
+library(plyr)
+library(corrplot)
+library(ggfortify)
 ```
 
-test 
+
+## Exploratory analysis
+
+```{r}
+data <- readRDS("/opt/omicsdata/datasets/SRP042620.rds") #load the data
+data #visualize the data
+```
+
+```{r}
+class(data) # to check the class of our data
+```
+
+```{r}
+assay(data) #we notice the first five genes have zero count, hence we will filter out genes with zero counts
+```
+
+
+```{r}
+#we use the function below to identify genes that have all zero counts across all samples and remove them from the dataset.
+table(rowSums(assay(data, "raw_counts")) == 0) 
+
+
+```
+
+We have 5889 genes of zero counts. Now we will filter out these genes
+
+```{r}
+data <- data[rowSums(assay(data, "raw_counts")) > 0, ] # We keep the genes with the sum > 0
+data
+```
+At the beginning of this analysis the unfiltered dataset had  63856 genes and 168 samples.
+After filtering the genes with zero counts we see that filtered dataset has now 57967 genes and 168 samples. hence, we correctly excluded 5889 genes with zero counts.
+
+#Biological Question: 
+
+The aim of our analysis is to identify the transcriptional differences between the two cancer types: Triple Negative Breast Cancer and ER+ Primary Cancer. The subtype information is stored in the $sra.sample_attributes in colData() object.
+
+```{r}
+table(data$sra.sample_attributes)
+```
+We have got 28 Cancer Cell Line|tissue, 42 - ER+, 42 - Triple Negative Breast Cancer, 5 No known cancer, 30 -Tissue adjacent to ER+ Primary Tumor, 21 - Tissue adjacent to TNBC Primary Tumor.
+The scope of this analysis is to learn  which genes are different between TNBC and ER+. Hence, we will filter out other cancer types to keep: TNBC and ER+.
+
+```{r}
+tnbc <- data[, 
+  grepl("Triple Negative Breast Cancer Primary Tumor", 
+        colData(data)$sra.sample_attributes)
+]
+tnbc
+
+colData(data)$tnbc <- tnbc
+```
+
+We look inside the column sra.sample_attributes to find which samples are TNBC.Using this condition, we select only those samples (rows) that correspond to TNBC. Then we store the result in a new object called tnbc.
+Now we repeat the same for ER+
+
+```{r}
+er <- data[, 
+  grepl("ER\\+ Breast Cancer Primary Tumor", 
+        colData(data)$sra.sample_attributes)
+]
+er
+```
+
+We can confirm that both of objects (tnbc and er) have 42 samples each. Since we filtered the data and created the tnbc and er objects using only the metadata of the samples, we now need to confirm that it contains all genes only within the samples of interest.
+
+```{r}
+rowData(tnbc)
+```
+
+

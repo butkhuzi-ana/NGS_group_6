@@ -199,12 +199,43 @@ plotRLE(raw_counts, outline = FALSE, las = 2,
 NOTE: [CHNAGE NAME OF SAMPLES] BECAUSE: The samples were not reordered. The RLE plot uses the column names of the raw count matrix as labels on the x-axis. Since the sample names were shortened using substr(), they now appear as partial IDs instead of sequential numbers, which makes them look unordered. However, the actual order of samples in the dataset has not changed.
 
 ## PCA
+[why does the pca looks the same to what we did in the class???]
 
 ```{r}
+raw_counts <- assay(data, "raw_counts")
+
+# log transform
 pca <- prcomp(t(log1p(raw_counts)))
 
-autoplot(pca, data = colData(data),
-         colour = "group") +
-  theme_minimal()
+# make sure group is a factor
+colData(data)$group <- factor(colData(data)$group, levels = c("ER", "TNBC"))
+
+# PCA plot colored by cancer type
+autoplot(
+  pca,
+  data = as.data.frame(colData(data)),
+  colour = "group",
+  size = 3
+) +
+  labs(title = "PCA of TNBC and ER samples", colour = "Cancer type") +
+  theme_bw()
+
+
+```
+
+```{r}
+#To label samples:
+autoplot(
+  pca,
+  data = as.data.frame(colData(data)),
+  colour = "group",
+  label = TRUE,
+  label.size = 3,
+  size = 3
+) +
+  theme_bw()
+```
+```{r}
+screeplot(pca, type = c("lines"))
 ```
 

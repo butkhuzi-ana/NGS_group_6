@@ -15,6 +15,7 @@ library(dplyr)
 library(plyr)
 library(corrplot)
 library(ggfortify)
+library(ggplot2)
 ```
 
 
@@ -60,31 +61,150 @@ table(data$sra.sample_attributes)
 We have got 28 Cancer Cell Line|tissue, 42 - ER+, 42 - Triple Negative Breast Cancer, 5 No known cancer, 30 -Tissue adjacent to ER+ Primary Tumor, 21 - Tissue adjacent to TNBC Primary Tumor.
 The scope of this analysis is to learn  which genes are different between TNBC and ER+. Hence, we will filter out other cancer types to keep: TNBC and ER+.
 
+
 ```{r}
-tnbc <- data[, 
-  grepl("Triple Negative Breast Cancer Primary Tumor", 
-        colData(data)$sra.sample_attributes)
+#create groups
+data$group <- NA
+data$group[grepl("ER\\+ Breast Cancer Primary Tumor", data$sra.sample_attributes)] <- "ER" # ER (ONLY primary tumor)
+data$group[grepl("Triple Negative Breast Cancer Primary Tumor", data$sra.sample_attributes)] <- "TNBC" # TNBC (ONLY primary tumor)
+```
+
+```{r}
+table(data$group) #to get the counts for each group
+```
+
+
+```{r}
+data$group # to visualize the column of group
+```
+In summary, We created a grouping variable in the sample metadata to label ER and TNBC samples.
+
+```{r}
+data <- data[, !is.na(data$group)] #filter the dataset
+```
+
+Second we subset the SummarizedExperiment to retain only those samples, optionally overwriting the original object to focus the analysis on the comparison of interest.
+
+```{r}
+#confirm that there are no NA in our dataset
+sum(is.na(data$group))
+summary(data$group)
+```
+
+```{r}
+# We visualize the first six genes and the first six samples
+assay(data, "raw_counts")[1:6, 1:6]
+```
+
+## boxplot
+
+```{r}
+raw_count <- assay(data, "raw_counts")
+boxplot(raw_count[, 1:20])
+
+
+```
+```{r}
+boxplot(log1p(raw_count)[, 1:20]) #apply log1p transformation then plot
+```
+
+```{r}
+colData(data)
+```
+
+```{r}
+library(tidyverse)
+
+# 1. Extract counts
+raw_counts <- assay(data, "raw_counts")
+
+# 2. Shorten sample names (same as base R)
+colnames(raw_counts) <- substr(colnames(raw_counts), 9, 20)
+
+# 3. Log transform + convert to data frame
+df <- as.data.frame(log1p(raw_counts))
+
+# 4. Keep gene info
+df$gene <- rownames(df)
+
+# 5. Convert to long format
+df_long <- df %>%
+  pivot_longer(cols = -gene,
+               names_to = "sample",
+               values_to = "expression")
+
+df_long
+
+# 6. Add subtype (biological group)
+df_long$subtype <- data$group[
+  match(df_long$sample, colnames(raw_counts))
 ]
-tnbc
 
-colData(data)$tnbc <- tnbc
+df_long
+
+# 7. Keep only first 20 samples (same as original)
+samples_84 <- colnames(raw_counts)[1:84]
+df_long <- df_long %>%
+  filter(sample %in% samples_84)
+
+# 8. Plot
+ggplot(df_long, aes(x = sample, y = expression, fill = subtype)) +
+  geom_boxplot() +
+  scale_y_continuous(limits = c(0, 20)) +
+  labs(x = "Sample", y = "log1p expression", fill = "subtype") +
+  theme(axis.text.x = element_text(angle = 90, size = 7))
 ```
 
-We look inside the column sra.sample_attributes to find which samples are TNBC.Using this condition, we select only those samples (rows) that correspond to TNBC. Then we store the result in a new object called tnbc.
-Now we repeat the same for ER+
+## MD and MA charts
+```{r}
+# comparing gene vs itself across samples (Y-axis) and positioning it by overall expression level (X-axis)
+limma::plotMA(log1p(raw_counts), main = "", xlab = "A", ylab = "M")
+```
+
+X axis - Genes near 12 are highly expressed whereas genes near 0 are lowly expressed.
+Y axis - Genes near +5 show much higher expression than average. Whereas genes near -5 show much lower expression than average.
+Dots on the top right (high A and high M): highly expressed genes that are even higher than average
+Dots on the lower right (high A and low M): highly expressed genes that are lower than average
+Dots on the left side: lowly expressed genes.
+
+Ideally, we would expect a horizontal line right at the 0 y-axis. Indeed, genes have different expression levels which are spread on the X-axis but should have no systematic bias (shown on the Y axis).
+
+The MA plot compares each gene to itself across samples, not to other genes. The x-axis (A) represents how strongly a gene is expressed overall, effectively placing it relative to other genes in terms of expression level. The y-axis (M) represents how much that same gene differs in a specific sample compared to its average expression across all samples. This means a gene can be highly expressed overall (high A) but still show a negative M value if it is expressed less than its usual level in that particular sample.
+
+
+
+While, to visualize the MD plot we can use the MDplot() function of the *EDASeq* package. In particular, we choose a pair of experiments for comparison (6 and 7 samples). In this case, we use the raw count matrix.
+
+The MD plot is useful because it directly compares gene expression between two specific samples, allowing detection of pairwise differences and biases that may not be visible when comparing a sample to the overall average. While the MA plot assesses global bias relative to all samples, the MD plot helps identify inconsistencies, batch effects, or outlier samples by focusing on direct sample-to-sample variation.
+
 
 ```{r}
-er <- data[, 
-  grepl("ER\\+ Breast Cancer Primary Tumor", 
-        colData(data)$sra.sample_attributes)
-]
-er
+MDPlot(raw_count, c(6, 7))
 ```
 
-We can confirm that both of objects (tnbc and er) have 42 samples each. Since we filtered the data and created the tnbc and er objects using only the metadata of the samples, we now need to confirm that it contains all genes only within the samples of interest.
+Even though samples 6 and 7 belong to the same cancer type, most genes show similar expression (centered around 0), indicating overall consistency. However, the presence of a systematic trend (non-flat line) suggests technical bias between the samples, especially depending on expression level. Additionally, higher variability is observed in low-expression genes, and some outliers indicate strong differences. This suggests that normalization is needed before further analysis.
+
+
+## RLE plot
+
+RLE plots are useful to check the differences between samples. Ideally, the median of boxplot should be centered around zero. Deviations indicate technical variation or differences in library size that may need normalization.
+
+much it deviates from the typical value.
 
 ```{r}
-rowData(tnbc)
+plotRLE(raw_counts, outline = FALSE, las = 2,
+        ylab = "RLE", main = "RLE of raw counts", col = col)
 ```
 
+NOTE: [CHNAGE NAME OF SAMPLES] BECAUSE: The samples were not reordered. The RLE plot uses the column names of the raw count matrix as labels on the x-axis. Since the sample names were shortened using substr(), they now appear as partial IDs instead of sequential numbers, which makes them look unordered. However, the actual order of samples in the dataset has not changed.
+
+## PCA
+
+```{r}
+pca <- prcomp(t(log1p(raw_counts)))
+
+autoplot(pca, data = colData(data),
+         colour = "group") +
+  theme_minimal()
+```
 

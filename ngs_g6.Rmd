@@ -22,22 +22,22 @@ library(ggplot2)
 ## Exploratory analysis
 
 ```{r}
-data <- readRDS("/opt/omicsdata/datasets/SRP042620.rds") #load the data
-data #visualize the data
+breastcancer <- readRDS("/opt/omicsdata/datasets/SRP042620.rds") #load the data
+breastcancer #visualize the data
 ```
 
 ```{r}
-class(data) # to check the class of our data
+class(breastcancer) # to check the class of our data
 ```
 
 ```{r}
-assay(data) #we notice the first five genes have zero count, hence we will filter out genes with zero counts
+assay(breastcancer) #we notice the first five genes have zero count, hence we will filter out genes with zero counts
 ```
 
 
 ```{r}
 #we use the function below to identify genes that have all zero counts across all samples and remove them from the dataset.
-table(rowSums(assay(data, "raw_counts")) == 0) 
+table(rowSums(assay(breastcancer, "raw_counts")) == 0) 
 
 
 ```
@@ -45,8 +45,8 @@ table(rowSums(assay(data, "raw_counts")) == 0)
 We have 5889 genes of zero counts. Now we will filter out these genes
 
 ```{r}
-data <- data[rowSums(assay(data, "raw_counts")) > 0, ] # We keep the genes with the sum > 0
-data
+breastcancer <- breastcancer[rowSums(assay(breastcancer, "raw_counts")) > 0, ] # We keep the genes with the sum > 0
+breastcancer
 ```
 At the beginning of this analysis the unfiltered dataset had  63856 genes and 168 samples.
 After filtering the genes with zero counts we see that filtered dataset has now 57967 genes and 168 samples. hence, we correctly excluded 5889 genes with zero counts.
@@ -56,7 +56,7 @@ After filtering the genes with zero counts we see that filtered dataset has now 
 The aim of our analysis is to identify the transcriptional differences between the two cancer types: Triple Negative Breast Cancer and ER+ Primary Cancer. The subtype information is stored in the $sra.sample_attributes in colData() object.
 
 ```{r}
-table(data$sra.sample_attributes)
+table(breastcancer$sra.sample_attributes)
 ```
 We have got 28 Cancer Cell Line|tissue, 42 - ER+, 42 - Triple Negative Breast Cancer, 5 No known cancer, 30 -Tissue adjacent to ER+ Primary Tumor, 21 - Tissue adjacent to TNBC Primary Tumor.
 The scope of this analysis is to learn  which genes are different between TNBC and ER+. Hence, we will filter out other cancer types to keep: TNBC and ER+.
@@ -64,59 +64,57 @@ The scope of this analysis is to learn  which genes are different between TNBC a
 
 ```{r}
 #create groups
-data$group <- NA
-data$group[grepl("ER\\+ Breast Cancer Primary Tumor", data$sra.sample_attributes)] <- "ER" # ER (ONLY primary tumor)
-data$group[grepl("Triple Negative Breast Cancer Primary Tumor", data$sra.sample_attributes)] <- "TNBC" # TNBC (ONLY primary tumor)
+breastcancer$group <- NA
+breastcancer$group[grepl("ER\\+ Breast Cancer Primary Tumor", breastcancer$sra.sample_attributes)] <- "ER" # ER (ONLY primary tumor)
+breastcancer$group[grepl("Triple Negative Breast Cancer Primary Tumor", breastcancer$sra.sample_attributes)] <- "TNBC" # TNBC (ONLY primary tumor)
 ```
 
 ```{r}
-table(data$group) #to get the counts for each group
+table(breastcancer$group) #to get the counts for each group
 ```
 
 
 ```{r}
-data$group # to visualize the column of group
+breastcancer$group # to visualize the column of group
 ```
 In summary, We created a grouping variable in the sample metadata to label ER and TNBC samples.
 
 ```{r}
-data <- data[, !is.na(data$group)] #filter the dataset
+breastcancer <- breastcancer[, !is.na(breastcancer$group)] #filter the dataset
 ```
 
 Second we subset the SummarizedExperiment to retain only those samples, optionally overwriting the original object to focus the analysis on the comparison of interest.
 
 ```{r}
 #confirm that there are no NA in our dataset
-sum(is.na(data$group))
-summary(data$group)
+sum(is.na(breastcancer$group))
+summary(breastcancer$group)
 ```
 
 ```{r}
 # We visualize the first six genes and the first six samples
-assay(data, "raw_counts")[1:6, 1:6]
+assay(breastcancer, "raw_counts")[1:6, 1:6]
 ```
 
 ## boxplot
 
 ```{r}
-raw_count <- assay(data, "raw_counts")
-boxplot(raw_count[, 1:20])
-
-
+raw_counts <- assay(breastcancer, "raw_counts")
+boxplot(raw_counts[, 1:20])
 ```
 ```{r}
-boxplot(log1p(raw_count)[, 1:20]) #apply log1p transformation then plot
+boxplot(log1p(raw_counts)[, 1:20]) #apply log1p transformation then plot
 ```
 
 ```{r}
-colData(data)
+colData(breastcancer)
 ```
 
 ```{r}
 library(tidyverse)
 
 # 1. Extract counts
-raw_counts <- assay(data, "raw_counts")
+raw_counts <- assay(breastcancer, "raw_counts")
 
 # 2. Shorten sample names (same as base R)
 colnames(raw_counts) <- substr(colnames(raw_counts), 9, 20)
@@ -136,7 +134,7 @@ df_long <- df %>%
 df_long
 
 # 6. Add subtype (biological group)
-df_long$subtype <- data$group[
+df_long$subtype <- breastcancer$group[
   match(df_long$sample, colnames(raw_counts))
 ]
 
@@ -179,7 +177,7 @@ The MD plot is useful because it directly compares gene expression between two s
 
 
 ```{r}
-MDPlot(raw_count, c(6, 7))
+MDPlot(raw_counts, c(6, 7))
 ```
 
 Even though samples 6 and 7 belong to the same cancer type, most genes show similar expression (centered around 0), indicating overall consistency. However, the presence of a systematic trend (non-flat line) suggests technical bias between the samples, especially depending on expression level. Additionally, higher variability is observed in low-expression genes, and some outliers indicate strong differences. This suggests that normalization is needed before further analysis.
@@ -192,8 +190,14 @@ RLE plots are useful to check the differences between samples. Ideally, the medi
 much it deviates from the typical value.
 
 ```{r}
+#create colors for RLE graph plot
+col <- as.factor(breastcancer$group)
+levels(col)
+levels(col) <- c(1:2) 
+
 plotRLE(raw_counts, outline = FALSE, las = 2,
         ylab = "RLE", main = "RLE of raw counts", col = col)
+
 ```
 
 NOTE: [CHNAGE NAME OF SAMPLES] BECAUSE: The samples were not reordered. The RLE plot uses the column names of the raw count matrix as labels on the x-axis. Since the sample names were shortened using substr(), they now appear as partial IDs instead of sequential numbers, which makes them look unordered. However, the actual order of samples in the dataset has not changed.
@@ -202,18 +206,18 @@ NOTE: [CHNAGE NAME OF SAMPLES] BECAUSE: The samples were not reordered. The RLE 
 [why does the pca looks the same to what we did in the class???]
 
 ```{r}
-raw_counts <- assay(data, "raw_counts")
+raw_counts <- assay(breastcancer, "raw_counts")
 
 # log transform
 pca <- prcomp(t(log1p(raw_counts)))
 
 # make sure group is a factor
-colData(data)$group <- factor(colData(data)$group, levels = c("ER", "TNBC"))
+colData(breastcancer)$group <- factor(colData(breastcancer)$group, levels = c("ER", "TNBC"))
 
 # PCA plot colored by cancer type
 autoplot(
   pca,
-  data = as.data.frame(colData(data)),
+  data = as.data.frame(colData(breastcancer)),
   colour = "group",
   size = 3
 ) +
@@ -227,7 +231,7 @@ autoplot(
 #To label samples:
 autoplot(
   pca,
-  data = as.data.frame(colData(data)),
+  data = as.data.frame(colData(breastcancer)),
   colour = "group",
   label = TRUE,
   label.size = 3,
@@ -238,4 +242,127 @@ autoplot(
 ```{r}
 screeplot(pca, type = c("lines"))
 ```
+
+# GC content
+
+GC content bias evaluation checks whether gene expression measurements are affected by the proportion of G (guanine) and C (cytosine) nucleotides in each gene. Ideally, gene expression should reflect true biological signal, but in practice, sequencing technologies can preferentially capture or amplify genes with certain GC content. This introduces a technical bias, meaning some genes may appear more or less expressed not because of biology, but because of their sequence composition.
+
+To assess this, we first retrieve GC content and gene length for each gene using annotation databases. The code extracts gene IDs from the dataset and uses them to query external genome annotation (hg38). The function getGeneLengthAndGCContent() returns, for each gene, its length and GC percentage. These values are then used in later steps to check whether expression levels depend on GC content. Genes without GC or length information are removed because they cannot be used to evaluate this bias.
+
+```{r}
+rowRanges(breastcancer)
+```
+
+```{r, message=F}
+
+ensid <- as.character(rowRanges(breastcancer)$gene_id) # Extract gene IDs from the dataset (metadata per gene)
+ensid <- substr(ensid, 1, 15) #Keep only the core gene ID, remove version info
+ensid
+
+# we specify genome assembly hg38 and org.db as mode to retrieve the information
+gc <- getGeneLengthAndGCContent(id = ensid, org = "hg38", mode = "org.db")
+gc
+# org = which genome / annotation reference to use
+# mode = org.db meaning we are using a pre-built annotation database in R (fast and reliable)
+```
+
+We obtain a numeric matrix, labeled us "gc", with two columns: gene length and GC-content.
+ we notice that some genes have no information (i.e., NA) about GC and gene length, so we to eliminate them and check for GC bias.
+
+```{r}
+table(is.na(gc[,2])) # look at column 2 of gc and count how many are NA (i.e, 31110 genes)
+
+```
+
+```{r}
+gc <- gc[!is.na(gc[,2]),] # this function keeps only genes, where gc is not missing.
+table(is.na(gc[,2]))
+```
+Now we can see that we removed the gens with NA.
+
+```{r}
+rowData(breastcancer)$ensid = ensid # adding gene IDs from ensid as column inside breastcancer. This is because breastcancer gene IDs were not easily usable. Now you can match genes with gc. [correct]
+
+```
+
+```{r}
+breastcancer <- breastcancer[rowData(breastcancer)$ensid %in% rownames(gc),] #Compare genes and breastcancer vs gc to keep only genes found in gc(i.e., genes with valid GC info)
+```
+
+```{r}
+raw_counts <- assay(breastcancer,  "raw_counts") # delete this command from here to above
+row.names(raw_counts) <- row.names(gc) # this done so both objects (raw_counts" and gc) use the same gene IDs and can be compared.
+```
+
+```{r}
+table(duplicated(row.names(raw_counts)))
+```
+We can see that we don't have duplicates.
+
+Then we create an object of class **SeqExpressionSet** to visualize the GC content. in particular, we use `newSeqExpressionSet()` function of the *EDASeq* package.
+
+```{r}
+set <- newSeqExpressionSet(raw_counts,
+                           phenoData = AnnotatedDataFrame(data.frame(conditions= factor(1:ncol(raw_counts)),
+                                                                     row.names = colnames(raw_counts))),
+                           featureData = AnnotatedDataFrame(data.frame(gc = gc[,2], l = gc[,1])))
+set
+```
+We add a dummy variable because the SetExpressionset object requires sample-level metadata to be created, even if we are not using it for analysis at this stage. Since we are only interested in GC bias (a gene level effect), we assign simple placeholder values to satisfy the structure, allowing the functions to run without introducing biological meaning yet.
+
+
+
+To visulaize the GC content for each sample we use the `biasPlot()` function.
+
+```{r}
+EDASeq::biasPlot(
+  set,
+  "gc",
+  ylim = c(0, 15),
+  log = TRUE,
+  xlab = "GC content",
+  ylab = "Log gene counts",
+  legend = TRUE,
+  col = 1:ncol(counts(set))
+)
+
+legend(
+  "topleft",
+  legend = colnames(counts(set)),
+  col = 1:ncol(counts(set)),
+  lty = 1,
+  title = "Samples"
+)
+```
+
+Interpretation of your plot
+
+This is a GC-content bias plot:
+
+X-axis (GC content): proportion of G/C bases in genes
+Y-axis (log gene counts): expression level (log-scaled)
+
+What your plot shows:
+
+All curves have a similar shape → good consistency across samples
+Counts increase with GC content up to ~0.6, then decline
+This indicates a systematic GC bias (common in RNA-seq)
+
+How to interpret it biologically/technically:
+
+The peak around ~60% GC suggests sequencing or amplification favors mid-GC genes
+The drop at high GC may reflect PCR or alignment inefficiencies
+Since all samples behave similarly, the bias is technical and consistent, not sample-specific
+
+
+Now, we will see within-samples normalization for GC-content bias and the between-samples normalization.
+
+```{r}
+save(list = c("breastcancer", "raw_counts", "set", "gc"), file = "preprocessingG6.RData")
+```
+
+
+
+
+
 

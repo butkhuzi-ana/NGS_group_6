@@ -16,6 +16,7 @@ library(plyr)
 library(corrplot)
 library(ggfortify)
 library(ggplot2)
+
 ```
 
 
@@ -362,7 +363,220 @@ save(list = c("breastcancer", "raw_counts", "set", "gc"), file = "preprocessingG
 ```
 
 
+# Normalization
+
+```{r}
+load("preprocessingG6.RData")
+```
+
+
+# Filtering 
+
+In the previous practical lesson, genes with all zero counts were removed. However, this is not sufficient because it does not eliminate genes with very low counts. We decided to keep only the genes with raw counts $\geq 10$.
+
+```{r}
+breastcancer_sel <- breastcancer[rowSums(assay(breastcancer, "raw_counts")) >= 10, ]
+set_sel <- set[rownames(set) %in% rowData(breastcancer_sel)$ensid, ]
+```
+
+```{r}
+n_before <- nrow(breastcancer)
+n_after  <- nrow(breastcancer_sel)
+n_removed <- n_before - n_after
+
+n_before
+n_after
+n_removed
 
 
 
+
+```
+
+```{r}
+ns_before <- nrow(set)
+ns_after  <- nrow(set_sel)
+ns_removed <- ns_before - ns_after
+
+ns_before
+ns_after
+ns_removed
+```
+Our datasets breastcancer and set contain the exact same genes. For normalization purposes, we created two new objects (i.e., breastcancer_sel and set_sel), within these two new objects we filtered genes with low counts (i.e., genes <- 10). Then, we ran a Q.C to check if our two initial datasets: breastcancer and set, contained the same number of genes. We also checked how many genes we removed because of low counts (i.e., 85). Finally, we ended with 26772 genes on each of our filtered datasets: breastcancer_sel and set_sel).
+
+
+# Normalization
+
+Normalization of RNA-seq read counts is an essential procedure that corrects for non-biological variation of samples due to library preparation, sequencing read depth, gene length, mapping bias and other technical issues. Normalization is composed of two main steps: within-sample normalization and between-sample normalization.
+
+## Within samples normalization
+
+The within-samples normalization is necessary for GC-content bias.
+
+```{r}
+before <- biasPlot(set_sel, "gc", ylim = c(0, 10), log = TRUE)
+```
+In this plot each curve represents one sample. The x-axis groups genes by GC content, and the y-axis shows average counts for genes with that GC content in that sample. Within-sample normalization tries to flatten each sample’s dependence on GC content. Remaining non-flatness suggests residual GC bias or incomplete correction, not between-sample bias.
+
+
+In two plots before and after filtering out low counts, we got the same results, as we removed only 85 genes.
+
+
+As you can see, the plot is different from the one obtained in the previous lesson, because we remove the genes with very low counts. However, some samples have very different trends from the others. So, normalization is necessary.
+
+To compute the within normalization we use the withinLaneNormalization() function of the EDASeq package.
+
+
+```{r}
+wt <- withinLaneNormalization(set_sel, "gc" , which = "upper", offset = TRUE)
+
+after <- biasPlot(wt, "gc", ylim = c(0, 10), log = TRUE)
+# test method -> discarded, read below
+```
+
+```{r}
+wt <- withinLaneNormalization(set_sel, "gc" , which = "median", offset = TRUE)
+
+after_median <- biasPlot(wt, "gc", ylim = c(0, 10), log = TRUE)
+# test method -> discarded, read below
+```
+```{r}
+wt <- withinLaneNormalization(set_sel, "gc" , which = "full", offset = TRUE)
+
+after_full <- biasPlot(wt, "gc", ylim = c(0, 10), log = TRUE)
+# kept method; read below for more info
+```
+We ran the withinLaneNormalization using three different "which" methods under the withinLaneNormalization function which were:
+* upper: We noticed with this method, the gc bias plot did not change or helped. As you can see in the after plot, it looks very similar to the before plot. Hence, we discarded this option.
+* median: We noticed it disturbed the data, the after plot shows disturbed gc content within samples, more so than the before plot. Hence, it did not help but made it worse.
+* full: In this after plot, we see that the samples are more clustered than in the before plot. We also do not see any significant distortions of samples. In fact, it seemed to have corrected the gc bias, because now samples with low gc content have a similar expression counts than samples with high gc content.
+
+#NOTE: We actually need to reviews which method fits to our date.
+
+## Between samples normalization
+
+After the within normalization we can compute the between normalization, using two R packages: *edgeR* and *EDASeq*.
+We can utilize the betweenLaneNormalization() function from the *EDASeq* package to perform normalization using both the full and upper quartile methods.
+
+After each sample is internally corrected, samples may still differ globally because of:
+sequencing depth
+library size
+composition bias
+One sample may simply have more total reads than another.
+Between-sample normalization rescales whole samples relative to each other so total expression levels become comparable.
+In boxplots or RLE plots:
+each box = one sample
+after normalization, boxes should align more closely
+Goal
+Remove technical differences between samples.
+
+```{r, warning=FALSE}
+#EDASeq normalization package:
+# offset = TRUE: normalized value returns as an offset leaving the original counts unchanged
+set_full <- betweenLaneNormalization(set_sel, which = "full", offset = TRUE)
+set_uq <- betweenLaneNormalization(set_sel, which = "upper", offset = TRUE)
+# we changed "set" to "set_sel".
+```
+
+
+```{r}
+# save the normalized matrix into an object
+full <- set_full@assayData$normalizedCounts
+uq_edaseq <- set_uq@assayData$normalizedCounts
+```
+
+Instead with *edgeR* package, we can use the calcNormFactors and cpm functions to estimate the normalizing factors for RLE, TMM, upper quartile, and total count normalizations.
+
+```{r}
+#edgeR normalization package:
+# Throughout this chunk, we modified every single "raw_count" to "raw_counts." We also modified every "set" to "set_sel." We believe between samples normalization should be done on set_sel. We have previously filtered this set_sel object by performing within samples normalization. We agreed that by further applying this other normalization method to the same dataset, we are removing even more bias. 
+raw_counts <- counts(set_sel)
+
+lbs <- calcNormFactors(raw_counts, method = "RLE")
+rle <- cpm(raw_counts, lib.size = lbs * colSums(raw_counts))
+
+lbs <- calcNormFactors(raw_counts, method = "TMM")
+tmm <- cpm(raw_counts, lib.size = lbs * colSums(raw_counts))
+
+lbs <- calcNormFactors(raw_counts, method = "upperquartile")
+uq <- cpm(raw_counts, lib.size = lbs * colSums(raw_counts))
+
+tc <- cpm(raw_counts)
+# we changed "set" to "set_sel" and "raw_count" to "raw_counts"
+```
+
+### Boxplot
+
+Expression matrix visualization after normalization using boxplot.
+
+```{r}
+boxplot(log2(raw_counts + 1), outline = FALSE,  las=2,
+        ylab = "log(count+1)", main = "Before normalization", xaxt = 'n')
+
+boxplot(log2(tc + 1), outline = FALSE, las = 2,
+        ylab = "log(count+1)", main = "Boxplot Total count", xaxt='n')
+
+boxplot(log2(rle + 1), outline=FALSE,  las=2,
+        ylab = "log(count+1)", main = "Boxplot RLE", xaxt = 'n')
+
+boxplot(log2(tmm + 1), outline=FALSE,  las=2,
+        ylab = "log(count+1)", main = "Boxplot TMM", xaxt = 'n')
+
+boxplot(log2(uq + 1), outline=FALSE,  las=2,
+        ylab = "log(count+1)", main = "Boxplot Upper quartile", xaxt = 'n')
+
+boxplot(log2(full + 1), outline=FALSE,  las=2,
+        ylab = "log(count+1)", main = "Boxplot full", xaxt = 'n')
+# we changed "raw_count" to "raw_counts"
+```
+The Before Normalization plot above shows inconsistency between samples. By exporing the different plots showing the different EDASeq normalization methods, Ana and I agreed that Plot “FULL,” shows a uniform distribution of our samples. 
+
+Hence, we can confirm that the “FULL” method seems to correct our samples efficiently using two different libraries: EDASeq and edgeR.
+
+[EXPAND: DO WE NEED TO CHOOSE OR KEEP BOTH, THIS IS SOMETHING TO DO RESEARCH ON]
+
+### RLE plot
+
+Expression matrix visualization after normalization using RLE plot.
+
+```{r}
+
+EDASeq::plotRLE(raw_counts, outline = FALSE,  las=2, col=col,
+        ylab = "RLE", main = "RLE before normalization", xaxt='n')
+
+EDASeq::plotRLE(tc, outline = FALSE,  las=2, col=col,
+        ylab = "RLE", main = "RLE total count", xaxt='n')
+
+EDASeq::plotRLE(tmm, outline = FALSE,  las=2, col=col,
+        ylab = "RLE", main = "RLE TMM", xaxt='n')
+
+EDASeq::plotRLE(rle, outline = FALSE,  las=2, col=col,
+        ylab = "RLE", main = "RLE RLE", xaxt='n')
+
+EDASeq::plotRLE(uq, outline = FALSE,  las=2, col=col,
+        ylab = "RLE", main = "RLE upper quartile", xaxt='n')
+
+EDASeq::plotRLE(full, outline = FALSE,  las=2, col=col,
+        ylab = "RLE", main = "RLE full", xaxt='n')
+```
+Total Count (TC)
+Scales each sample by its total number of reads so samples with more sequencing depth are reduced proportionally. Simple method, but sensitive to a few highly expressed genes.
+
+TMM (Trimmed Mean of M-values)
+Compares samples after removing extreme genes and computes robust scaling factors. Corrects composition bias when some genes are highly overexpressed in one sample.
+
+RLE (Relative Log Expression)
+Uses the median ratio of each sample to a reference built from all samples, assuming most genes are not differentially expressed. Good general-purpose normalization.
+
+Upper Quartile (UQ)
+Scales samples using the 75th percentile of counts rather than total counts. Reduces the influence of many zero/low counts and extreme highly expressed genes.
+
+Full (EDASeq)
+Adjusts the entire count distribution across samples so distributions become similar. More comprehensive and stronger normalization than single-summary scaling methods.
+
+Raw Count (Before normalization)
+Original counts with no correction, so differences may reflect technical factors like library size rather than true biology.
+
+In conclusion, RLE analysis further confirms that the "full" method corrects our data properly.
+#NOTE: We are not actually sure which methods to choose, because in class the "full" method seemed better, but they went for RLE instead. We should do the research, how to choose the proper method.
 

@@ -1,0 +1,1724 @@
+---
+title: "Transcriptomic and Pathway Analysis of TNBC and ER+ Breast Cancer"
+author: "Ana Butkhuzi and Ericka Garcia"
+output:
+  html_document:
+    theme: cerulean
+    toc: yes
+    toc_depth: 3
+    number_sections: true
+---
+
+# Transcriptomic and Pathway Analysis of TNBC and ER+ Breast Cancer
+
+## Biological Problem and Study Context
+Breast cancer is a heterogeneous disease composed of multiple molecular subtypes with distinct molecular and clinical characteristics. Among these, triple-negative breast cancer (TNBC) is generally more aggressive and associated with poorer prognosis compared to estrogen receptor-positive (ER+) breast cancer. Understanding the transcriptional differences between these subtypes is important for improving diagnosis, prognosis, and therapeutic strategies.
+
+The original study used paired-end RNA sequencing (RNA-seq) to investigate recurrent read-through fusion transcripts associated with breast cancer. Unlike classical fusion genes caused by genomic DNA rearrangements, these fusion transcripts are abnormal chimeric RNAs formed at the transcriptional and splicing level. Using RNA-seq and ChimeraScan analysis, the authors identified two recurrent fusion transcripts, SCNN1A-TNFRSF1A and CTSD-IFITM10, that were associated with breast cancer and detected in both TNBC and ER+ samples.
+
+Although the original study focused on the discovery and validation of fusion transcripts, it did not investigate transcriptome-wide differential gene expression between TNBC and ER+ breast cancer samples. Therefore, the aim of the present analysis is to extend the original RNA-seq dataset by identifying global transcriptional differences between Triple Negative Breast Cancer and ER+ Primary Cancer samples. The subtype information used for this comparison is stored in the $sra.sample_attributes variable within the colData() object.
+
+```{r, message=FALSE, warning=FALSE}
+# RNA-seq Analysis
+library(DESeq2)
+library(limma)
+library(edgeR)
+library(EDASeq)
+library(genefilter)
+
+# Data Handling
+library(omicsdata)
+library(dplyr)
+library(plyr)
+
+# Visualization
+library(corrplot)
+library(ggfortify)
+library(ggplot2)
+library(pheatmap)
+library(ggrepel)
+library(ggnewscale)
+library(ggupset)
+library(ggridges)
+
+# Clustering
+library(cluster)
+
+# Enrichment & Pathways
+library(clusterProfiler)
+library(pathview)
+library(ReactomePA)
+library(enrichplot)
+
+# Annotation
+library(AnnotationDbi)
+library(org.Hs.eg.db)
+
+# Reporting
+library(knitr)
+
+# Table Aesthetics
+library(kableExtra)
+```
+
+## Exploratory analysis
+A RangedSummarizedExperiment is a Bioconductor object used to store high-throughput genomic data, such as RNA-seq counts, together with associated information about genes and samples. It organizes the experiment into three main components: the assay data (e.g., expression counts), row metadata containing genomic ranges or gene annotations, and column metadata describing the biological samples.
+
+The data for this analysis was stored in the breastcancer object and imported from the dataset file SRP042620.rds using the readRDS() function. This dataset originates from the study by Varley KE et al. titled “Recurrent read-through fusion transcripts in breast cancer” published in Breast Cancer Research and Treatment (2014).
+
+```{r}
+#load, visualize and confirm the class of the data
+breastcancer <- readRDS("/opt/omicsdata/datasets/SRP042620.rds") 
+breastcancer 
+class(breastcancer)
+
+#saving the SummarizedExperiment object with the original data
+#save(breastcancer, file = "NGS_Ana Butkhuzi_Ericka Garcia.RData")
+```
+
+The dataset was first filtered to remove genes with zero counts across all samples, since genes with no detected expression do not contribute meaningful biological information and may introduce unnecessary noise into downstream analyses. This preprocessing step reduces dataset complexity and improves the reliability of normalization and differential expression analyses.
+
+```{r}
+# Identify genes with zero counts across all samples
+table(rowSums(assay(breastcancer, "raw_counts")) == 0)
+
+# Remove genes with total counts equal to zero
+breastcancer <- breastcancer[rowSums(assay(breastcancer, "raw_counts")) > 0, ]
+breastcancer
+```
+
+The rowSums() function computes the total read counts for each gene across all samples. Genes with a total count equal to zero were identified and excluded from the dataset, while genes with counts greater than zero were retained. Initially, the dataset contained 63,856 genes and 168 samples. After filtering, the dataset contained 57,967 genes and 168 samples, indicating that 5,889 genes with zero counts were successfully removed.
+
+As an initial step, the sample subtype annotations stored in the $sra.sample_attributes variable were examined using a frequency table to verify the composition of the dataset and confirm the presence of the groups of interest (i.e., ER+ and TNBC).
+
+```{r}
+table(breastcancer$sra.sample_attributes)
+```
+
+The dataset contained multiple sample categories, including 42 ER+ breast cancer samples and 42 Triple Negative Breast Cancer (TNBC) samples, in addition to cancer cell lines, adjacent tissue samples, and samples with no known cancer classification. Since the objective of this analysis is to investigate transcriptomic differences between TNBC and ER+ breast cancer, only these two subtypes were retained for downstream analyses, while all other sample categories were excluded.
+
+To focus the analysis on the two breast cancer subtypes of interest, a new metadata column called group was created inside the breastcancer object. Samples annotated as ER+ Primary Tumor were assigned to the "ER" group, while samples annotated as Triple Negative Breast Cancer Primary Tumor were assigned to the "TNBC" group. Samples belonging to other categories were temporarily labeled as NA.
+
+```{r}
+# Create a new group variable for the two subtypes of interest
+breastcancer$group <- NA
+
+# Assign ER+ primary tumor samples to the ER group
+breastcancer$group[grepl("ER\\+ Breast Cancer Primary Tumor", 
+                         breastcancer$sra.sample_attributes)] <- "ER"
+
+# Assign TNBC primary tumor samples to the TNBC group
+breastcancer$group[grepl("Triple Negative Breast Cancer Primary Tumor", 
+                         breastcancer$sra.sample_attributes)] <- "TNBC"
+
+# Check the number of samples in each group
+table(breastcancer$group)
+
+# Visualize the group assignment
+breastcancer$group
+```
+
+The grepl() function was used to search the sample annotation column and identify samples matching the two cancer subtypes. This step confirmed that the dataset contained 42 ER+ samples and 42 TNBC samples, resulting in a balanced comparison between the two groups.
+
+```{r}
+# Keep only samples assigned to either ER or TNBC
+breastcancer <- breastcancer[, !is.na(breastcancer$group)]
+
+# Confirm that no unassigned samples remain
+sum(is.na(breastcancer$group))
+summary(breastcancer$group)
+```
+
+After assigning the groups, the breastcancer object was subsetted to retain only samples classified as ER or TNBC. Samples with NA values in the group column were removed because they corresponded to categories outside the scope of this analysis, such as cancer cell lines, adjacent tissues, or samples with no known cancer classification. After filtering, the dataset contained 84 samples in total, with no remaining unassigned samples.
+
+
+The filtered RNA-seq count matrix was inspected to verify the structure of the data and evaluate the distribution of expression counts across samples. In addition, the sample metadata was checked to confirm that all retained samples were correctly assigned to the ER or TNBC groups.
+
+```{r}
+# Visualize the first six genes and first six samples
+assay(breastcancer, "raw_counts")[1:6, 1:6]
+
+# Visualize the distribution of raw counts for the first 20 samples
+boxplot(assay(breastcancer, "raw_counts")[, 1:20])
+
+# Apply log1p transformation and visualize the distribution again
+boxplot(log1p(assay(breastcancer, "raw_counts"))[, 1:20])
+
+# Confirm that the group column was correctly created
+colData(breastcancer)[, "group", drop = FALSE]
+```
+A new object named raw_counts_plot was created from the filtered count matrix and was consistently used throughout the analysis for downstream visualizations, including ggplot2 graphics, PCA analyses, and other exploratory plots. Boxplots were then used to examine the distribution of expression values across samples before and after applying a log1p() transformation (log(1 + count)), which reduces the effect of highly expressed genes and improves visualization of RNA-seq count distributions. Finally, the group column from the colData() object was displayed to verify the correct classification of samples into the ER and TNBC subtypes.
+
+```{r}
+# Figure 1. Boxplot of log-Transformed Gene Expression Counts Across Samples
+
+library(tidyverse)
+
+# Extract raw counts from the breastcancer object
+raw_counts_plot <- assay(breastcancer, "raw_counts")
+
+# Rename samples as 1, 2, 3, ... up to the total number of samples
+colnames(raw_counts_plot) <- as.character(seq_len(ncol(raw_counts_plot)))
+
+# Apply log1p transformation and convert to data frame
+df <- as.data.frame(log1p(raw_counts_plot))
+
+# Keep gene identifiers
+df$gene <- rownames(df)
+
+# Convert to long format for ggplot
+df_long <- df %>%
+  pivot_longer(
+    cols = -gene,
+    names_to = "sample",
+    values_to = "expression"
+  )
+
+# Add subtype information
+df_long$subtype <- breastcancer$group[as.numeric(df_long$sample)]
+
+# Generate boxplot for all samples
+ggplot(df_long,
+       aes(x = factor(sample,
+                      levels = as.character(seq_len(ncol(raw_counts_plot)))),
+           y = expression,
+           fill = subtype)) +
+  geom_boxplot() +
+  labs(title = "Figure 1. Boxplot of log-Transformed Gene Expression Counts Across Samples",
+       x = "Sample",
+       y = "log1p expression",
+       fill = "Subtype") +
+  theme(axis.text.x = element_text(angle = 90, size = 6))
+```
+
+The boxplot confirms that the dataset contains samples from the two breast cancer subtypes of interest, ER and TNBC, as indicated by the subtype color coding. The distributions still reflect unnormalized RNA-seq count data, which is expected at this stage of the workflow since no normalization procedures have yet been applied. The observed variability between samples further justifies the need for downstream normalization prior to differential gene expression analysis.
+
+## MD and MA charts
+
+To further assess the distribution and variability of the RNA-seq count data, MA and MD plots were generated as exploratory quality control analyses. These plots help visualize expression differences, detect systematic technical bias, and evaluate the consistency of gene expression measurements across samples prior to normalization.
+
+```{r}
+# MA plot
+limma::plotMA(
+  log1p(assay(breastcancer, "raw_counts")),
+  main = "Figure 2. MA Plot Showing Gene Expression Variability Across Samples",
+  xlab = "A",
+  ylab = "M"
+)
+
+# MD plot comparing samples 6 and 7
+MDPlot(
+  assay(breastcancer, "raw_counts"),
+  c(6, 7),
+  main = "Figure 3. MD Plot Comparing Gene Expression Between Samples 6 and 7"
+)
+```
+
+The MA plot compares each gene to its average expression across all samples. The x-axis (A) represents the overall average expression level of each gene, while the y-axis (M) represents how much the expression of that gene deviates from its average level. Ideally, the points should be centered around the horizontal line at M = 0, indicating the absence of strong systematic bias. In this dataset, genes with low expression levels show greater variability, while highly expressed genes appear more stable, which is commonly observed in raw RNA-seq count data.
+
+The MD plot directly compares gene expression between samples 6 and 7, which belong to the same breast cancer subtype. Most genes are centered around zero, indicating that the two samples are generally similar in their expression profiles. However, the presence of a non-flat trend and increased variability among lowly expressed genes suggests technical bias and sample-to-sample variability. These observations indicate that normalization is required before performing downstream differential gene expression analyses.
+
+
+## RLE plot
+
+Relative Log Expression (RLE) plots were generated as an additional quality control step to evaluate variability between samples before normalization. RLE plots assess how much the expression of each gene in a sample deviates from the median expression of that gene across all samples. Ideally, the boxplots should be centered around zero with similar spreads across samples. Systematic deviations from zero or large differences in spread may indicate technical variation, library size differences, or other biases that require normalization.
+
+```{r}
+# Create colors based on breast cancer subtype
+col <- as.factor(breastcancer$group)
+levels(col) <- c(1, 2)
+
+# Create numerical labels for samples
+sample_labels <- seq_len(ncol(assay(breastcancer, "raw_counts")))
+
+# Generate RLE plot
+plotRLE(
+  assay(breastcancer, "raw_counts"),
+  outline = FALSE,
+  las = 2,
+  names = sample_labels,
+  ylab = "RLE",
+  main = "Figure 4. RLE Plot of Raw RNA-seq Counts",
+  col = col
+)
+
+# Add legend
+legend(
+  "topright",
+  legend = c("ER", "TNBC"),
+  fill = c(1, 2),
+  title = "Subtype",
+  cex = 0.8
+)
+```
+
+## PCA
+
+Principal Component Analysis (PCA) was performed as an exploratory analysis to evaluate the overall variability and clustering patterns among ER and TNBC samples based on their gene expression profiles. PCA reduces the dimensionality of the RNA-seq dataset by summarizing the major sources of variation into principal components, allowing visualization of similarities and differences between samples.
+
+```{r}
+# log transform
+pca <- prcomp(t(log1p(raw_counts_plot)))
+
+# make sure group is a factor
+colData(breastcancer)$group <- factor(colData(breastcancer)$group, levels = c("ER", "TNBC"))
+
+# PCA plot colored by cancer type
+autoplot(
+  pca,
+  data = as.data.frame(colData(breastcancer)),
+  colour = "group",
+  size = 3
+) +
+  labs(title = "Figure 5. PCA of TNBC and ER samples", colour = "Cancer type") +
+  theme_bw()
+```
+
+The PCA plot shows a partial separation between ER and TNBC samples, indicating that the two breast cancer subtypes exhibit distinct gene expression patterns. However, some overlap between groups is still observed, suggesting biological heterogeneity within each subtype and shared transcriptional characteristics between ER and TNBC samples.
+
+```{r}
+screeplot(pca, type = c("lines"), main = "Figure 6. PCA scree plot between ER and TNBC samples")
+```
+
+According to the PCA scree plot, the first four principal components explain the largest proportion of variability in the dataset, as indicated by the steep decline in variance observed from PC1 to PC4. After the fourth component, the decrease in variance becomes more gradual, suggesting that additional principal components contribute less substantially to the overall variability in gene expression data.
+
+## GC content
+
+GC content bias evaluation was performed to assess whether gene expression measurements were influenced by the proportion of guanine (G) and cytosine (C) nucleotides present within each gene. Ideally, RNA-seq expression values should reflect true biological differences; however, sequencing and amplification technologies can preferentially capture genes with certain GC compositions, introducing technical bias into the dataset.
+
+Gene identifiers were extracted from the breastcancer dataset, which represents the RNA-seq dataset analyzed throughout this study, and matched to annotation information from the human reference genome `hg38`. The `getGeneLengthAndGCContent()` function was then used to retrieve gene length and GC-content values for each gene present in the dataset.
+
+```{r,}
+# Extract gene IDs from breastcancer dataset and create a vector with 57967 labels, one per gene
+ensid <- as.character(rowRanges(breastcancer)$gene_id)
+
+# Keep only the core Ensembl gene ID
+ensid <- substr(ensid, 1, 15)
+
+# Retrieve gene length and GC content information
+gc <- getGeneLengthAndGCContent(
+  id = ensid,
+  org = "hg38",
+  mode = "org.db"
+)
+```
+
+During annotation retrieval, a warning indicating a “1:many mapping” between gene identifiers and annotation entries was observed. This occurs because some Ensembl gene IDs correspond to multiple annotation records or transcript variants within the reference database and is a common occurrence in genomic annotation workflows.
+
+The resulting object, gc, is a numeric matrix containing gene ID (excluding version number), gene length and GC-content information for each gene.
+
+
+### GC content inspection
+
+Subsequently, the gc matrix was inspected to determine the number of missing values (NA) present in the GC content and gene length annotations.
+
+```{r}
+table(is.na(gc[,2])) #counts of genes with NA inside `gc` object
+```
+
+During inspection of the matrix, 31110 genes were found to contain missing values (NA). These genes were removed because incomplete annotation information prevents accurate evaluation of GC-related technical bias.
+
+```{r}
+gc <- gc[!is.na(gc[,2]),] # this function keeps only genes, where gc is not missing.
+
+table(is.na(gc[,2]))
+```
+
+After removing genes with missing GC-content information, a cleaned gc object was obtained containing the processed gene identifiers from the breastcancer dataset.
+
+The next steps further processed the breastcancer, ensid, and gc objects to ensure proper matching between gene expression counts and GC-content annotations. First, the preprocessed ensid vector, created from the breastcancer dataset, was added to the breastcancer object as a new column within the rowData() metadata, since these gene identifiers no longer contained version numbers after the decimal point. At this stage, the dimensions of the breastcancer dataset were 57,967 genes and 84 samples.
+
+```{r}
+rowData(breastcancer)$ensid = ensid # ensid vector added to rowData matrix
+dim(breastcancer)
+```
+
+Next, the gc object was used to match GC-content information with the processed ensid values previously incorporated into the breastcancer object. This step filtered the 57967 genes by retaining 26857 genes which were found both in the annotation database and within the ensid vector from the breastcancer dataset, ensuring that gene expression values and GC-content annotations corresponded to the same set of genes.
+
+```{r}
+# Keep only genes in the breastcancer dataset that are also found in the gc annotation matrix
+breastcancer <- breastcancer[rowData(breastcancer)$ensid %in% rownames(gc),] 
+dim(breastcancer)
+```
+
+After filtering the genes to retain only those shared between the breastcancer dataset and the GC-content annotation matrix (gc object), the next steps ensured that the gc annotation matrix and the RNA-seq count matrix corresponded to the exact same genes in the same order.
+
+First, the gc matrix was reordered according to the processed ensid gene identifiers stored within the breastcancer dataset, ensuring that the GC-content annotations followed the same gene order as the expression data.
+
+```{r}
+# Reorder the gc matrix to follow the cleaned ensid gene order stored in the breastcancer dataset
+gc <- gc[rowData(breastcancer)$ensid, ]
+
+# Extract the raw RNA-seq count matrix from the breastcancer dataset
+raw_counts <- assay(breastcancer, "raw_counts")
+
+# Replace row names of the count matrix in breastcancer with the processed and cleaned ensid gene identifiers
+rownames(raw_counts) <- rowData(breastcancer)$ensid
+```
+
+A new object of class **SeqExpressionSet** was created to visualize the GC content using the function `newSeqExpressionSet()` from the *EDASeq* package.
+```{r}
+set <- newSeqExpressionSet(raw_counts,
+                           phenoData = AnnotatedDataFrame(data.frame(conditions = factor(1:ncol(raw_counts)),
+                                                                     row.names = colnames(raw_counts))),
+                           featureData = AnnotatedDataFrame(data.frame(gc = gc[, 2], l = gc[, 1])))
+```
+
+To visualize the GC content for each sample we use the `biasPlot()` function.
+
+```{r}
+EDASeq::biasPlot(
+  set,
+  "gc",
+  ylim = c(0, 15),
+  log = TRUE,
+  xlab = "GC Content",
+  ylab = "Log Gene Counts",
+  main = "Figure 7. GC Content Bias Across Samples",
+  legend = FALSE,
+  col = 1:ncol(counts(set))
+)
+
+legend(
+  "right",
+  inset = c(-0.18, 0),
+  legend = seq_len(ncol(counts(set))),
+  col = 1:ncol(counts(set)),
+  lty = 1,
+  cex = 0.7,
+  title = "Sample ID",
+  xpd = TRUE
+)
+```
+
+The GC-content bias plot shows the relationship between GC content and gene expression levels across all samples. Overall, the curves display a similar pattern, indicating good consistency between samples and suggesting that the observed bias is systematic rather than sample-specific.
+
+Gene counts increase as GC content increases up to approximately 60% GC, after which expression levels begin to decrease. This pattern suggests the presence of GC-related technical bias, which is commonly observed in RNA-seq data and may result from sequencing, amplification, or alignment preferences for genes with intermediate GC content.
+
+Next, the trend of the log-ratio of gene expression between samples 1 and 3 was examined as GC content changes, allowing visualization of how GC composition may influence differences in expression measurements between the two samples, from the same group (i.e., ER).
+
+```{r}
+lrt <- log(raw_counts[, 1] + 1) - log(raw_counts[, 3] + 1)
+biasBoxplot(lrt, gc[, 2], outline = FALSE, xlab = "GC-content", ylab = "Gene expression", las = 2, cex.axis = 0.5, main = "Figure 8. Gene expression between samples 1 and 3")
+```
+
+Next, the trend of the log-ratio of gene expression between sample 1 (ER subtype) and sample 84 (TNBC subtype) was examined as GC content changes. 
+
+```{r}
+lrt <- log(raw_counts[, 1] + 1)- log(raw_counts[, 84] + 1)
+biasBoxplot(lrt, gc[, 2], outline = FALSE, xlab = "GC-content", ylab = "Gene expression", las = 2, cex.axis = 0.5, main = "Figure 9. Gene expression between samples 1 and 84")
+```
+
+
+## Filtering 
+
+To initiate normalization, genes with all zero counts had already been removed in previous steps. However, genes with extremely low counts can still introduce noise and reduce the reliability of downstream analyses. Therefore, only genes with total raw counts greater than or equal to 10 were retained in a newly created object named breastcancer_sel, which was generated from the original breastcancer dataset. Thus, both objects contain the same samples and structure, except that breastcancer_sel excludes genes with fewer than 10 total counts.
+
+```{r}
+breastcancer_sel <- breastcancer[rowSums(assay(breastcancer, "raw_counts")) >= 10, ]
+dim(breastcancer_sel)
+class(breastcancer_sel)
+```
+
+In addition, a new object named set_sel was created from the previously generated set object, which is a SeqExpressionSet created for GC-content visualization and normalization analyses. Similar to breastcancer_sel, the set_sel object retained only genes with total raw counts greater than or equal to 10, ensuring consistency between both filtered datasets.
+
+```{r}
+set_sel <- set[rownames(set) %in% rowData(breastcancer_sel)$ensid, ]
+dim(set_sel)
+```
+After filtering, 85 low-count genes were removed, reducing the dataset from 26,857 to 26,772 genes in both filtered objects (i.e., breastcancer_sel and set_sel).
+
+# Normalization
+
+Normalization of RNA-seq read counts is an essential procedure that corrects for non-biological variation of samples due to library preparation, sequencing read depth, gene length, mapping bias and other technical issues. Normalization is composed of two main steps: within-sample normalization and between-sample normalization.
+
+
+```{r}
+before <- biasPlot(
+  set_sel,
+  "gc",
+  ylim = c(0, 10),
+  log = TRUE,
+  main = "Figure 10. GC Content Bias Before Normalization",
+  legend = FALSE
+)
+
+legend(
+  "right",
+  inset = c(-0.15, 0),
+  legend = seq_len(ncol(counts(set_sel))),
+  col = 1:ncol(counts(set_sel)),
+  lty = 1,
+  cex = 0.6,
+  title = "Sample ID",
+  xpd = TRUE
+)
+```
+
+In this plot, each curve represents one sample. The x-axis groups genes according to GC content, while the y-axis shows the average gene counts for genes within each GC-content range. Ideally, the curves should appear relatively flat, indicating minimal dependence of expression values on GC composition.
+
+The results obtained after filtering low-count genes were very similar to those observed in Figure 7. GC Content Bias Across Samples, which is expected since only 85 genes were removed during filtering. However, some samples still display different trends compared to others, indicating the presence of GC-related technical bias. Therefore, within-sample normalization was required to reduce this effect.
+
+## Within sample normalization
+To perform within-sample normalization, the withinLaneNormalization() function from the EDASeq package was applied Within-sample using three different methods under the withinLaneNormalization() function: upper, median, and full.
+
+```{r}
+wt <- withinLaneNormalization(set_sel, "gc" , which = "upper", offset = TRUE)
+
+after <- biasPlot(wt, "gc", ylim = c(0, 10), log = TRUE, main = "Figure 11. GC Content Bias After Normalization Upper Method", legend = FALSE)
+
+legend(
+  "right",
+  inset = c(-0.15, 0),
+  legend = seq_len(ncol(counts(set_sel))),
+  col = 1:ncol(counts(set_sel)),
+  lty = 1,
+  cex = 0.6,
+  title = "Sample ID",
+  xpd = TRUE
+)
+
+```
+
+```{r}
+wt <- withinLaneNormalization(set_sel, "gc" , which = "median", offset = TRUE)
+
+after_median <- biasPlot(wt, "gc", ylim = c(0, 10), log = TRUE, legend = FALSE, main = "Figure 12. GC Content Bias After Normalization Median Method")
+
+legend(
+  "right",
+  inset = c(-0.15, 0),
+  legend = seq_len(ncol(counts(set_sel))),
+  col = 1:ncol(counts(set_sel)),
+  lty = 1,
+  cex = 0.6,
+  title = "Sample ID",
+  xpd = TRUE
+)
+```
+
+
+```{r}
+wt <- withinLaneNormalization(set_sel, "gc" , which = "full", offset = TRUE)
+
+after_full <- biasPlot(wt, "gc", ylim = c(0, 10), log = TRUE, legend = FALSE,main = "Figure 13. GC Content Bias After Normalization Full Method" )
+
+legend(
+  "right",
+  inset = c(-0.15, 0),
+  legend = seq_len(ncol(counts(set_sel))),
+  col = 1:ncol(counts(set_sel)),
+  lty = 1,
+  cex = 0.6,
+  title = "Sample ID",
+  xpd = TRUE
+)
+```
+
+Upper: This method preserved the overall structure of the data while introducing only mild corrections to the GC-content bias. Although the improvement was moderate, the sample distributions remained stable and biologically consistent, making this method a more conservative normalization approach.
+Median: This method introduced noticeable distortions into the data. The normalized plots showed more irregular trends between samples compared to the original data, suggesting that the correction negatively affected the expression distributions.
+Full: This method substantially reduced the GC-content bias and produced more clustered sample curves. However, the correction appeared relatively strong and may have over-adjusted the data, potentially removing part of the biological variability together with the technical bias.
+
+Considering the balance between bias correction and preservation of the original expression structure, the upper method was selected for downstream analyses because it provided a more moderate and less aggressive normalization approach.
+
+## Between samples normalization
+
+After within-sample normalization, between-sample normalization was performed to reduce global technical differences between samples, such as sequencing depth and library size. The `betweenLaneNormalization()` function from the *EDASeq* package was used to evaluate both the full and upper normalization methods.
+
+```{r, warning=FALSE}
+#EDASeq normalization package:
+# offset = TRUE: normalized value returns as an offset leaving the original counts unchanged
+set_full <- betweenLaneNormalization(set_sel, which = "full", offset = TRUE)
+
+set_uq <- betweenLaneNormalization(set_sel, which = "upper", offset = TRUE)
+
+```
+
+The normalized count matrices generated from both normalization methods were then extracted and stored for downstream analyses under the objects: `full`(Full Method) and `uq_edaseq`(Upper Method).
+
+```{r}
+# save the normalized matrix into an object
+full <- set_full@assayData$normalizedCounts
+
+uq_edaseq <- set_uq@assayData$normalizedCounts
+```
+
+```{r}
+# Figure 14. RLE Plot After Between-Sample Normalization Using the Full Method
+
+plotRLE(
+  full,
+  outline = FALSE,
+  las = 2,
+  names = seq_len(ncol(full)),
+  ylab = "RLE",
+  main = "Figure 14. RLE Plot After Full Between-Sample Normalization",
+  col = col
+)
+
+legend(
+  "topright",
+  legend = c("ER", "TNBC"),
+  fill = c(1, 2),
+  title = "Subtype",
+  cex = 0.8
+)
+```
+
+```{r}
+# Figure 15. RLE Plot After Between-Sample Normalization Using the Upper Method
+
+plotRLE(
+  uq_edaseq,
+  outline = FALSE,
+  las = 2,
+  names = seq_len(ncol(uq_edaseq)),
+  ylab = "RLE",
+  main = "Figure 15. RLE Plot After Upper Between-Sample Normalization",
+  col = col
+)
+
+legend(
+  "topright",
+  legend = c("ER", "TNBC"),
+  fill = c(1, 2),
+  title = "Subtype",
+  cex = 0.8
+)
+```
+
+```{r}
+# Boxplot for EDASeq full normalization
+boxplot(log2(full + 1),
+        outline = FALSE,
+        las = 2,
+        ylab = "log(count+1)",
+        main = "Figure 16. Boxplot EDASeq Full",
+        xaxt = "n")
+
+# Boxplot for EDASeq upper normalization
+boxplot(log2(uq_edaseq + 1),
+        outline = FALSE,
+        las = 2,
+        ylab = "log(count+1)",
+        main = "Figure 17. Boxplot EDASeq Upper",
+        xaxt = "n")
+```
+
+In conclusion, Figures 14 and 15 show how the samples align across the horizontal axis after normalization. In contrast, Figures 16 and 17 indicate that the full method applied a stronger correction to the data, while the upper method produced a more moderate normalization and appeared to preserve the original sample distributions more effectively.
+
+However, previous studies, including Liu et al. (2021), describe the edgeR package as an efficient approach for RNA-seq normalization, particularly for differential gene expression analysis. Therefore, this analysis additionally evaluated three normalization methods implemented in *edgeR* package: RLE, TMM, and Upper Quartile by using the `calcNormFactors` and `cpm` functions.
+
+```{r}
+# Update `raw_counts` to exclude genes with counts < 10
+raw_counts <- assay(breastcancer_sel, "raw_counts")
+dim(raw_counts)
+
+# Compute normalization factors using the RLE normalization method
+lbs_rle <- calcNormFactors(raw_counts, method = "RLE")
+
+# Generate an RLE-normalized expression matrix in counts per million (CPM)
+rle <- cpm(raw_counts, lib.size = lbs_rle * colSums(raw_counts))
+
+
+# Compute normalization factors using the TMM normalization method
+lbs_tmm <- calcNormFactors(raw_counts, method = "TMM")
+
+# Generate a TMM-normalized expression matrix in counts per million (CPM)
+tmm <- cpm(raw_counts, lib.size = lbs_tmm * colSums(raw_counts))
+
+
+# Compute normalization factors using the Upper Quartile normalization method
+lbs_uq <- calcNormFactors(raw_counts, method = "upperquartile")
+
+# Generate an Upper Quartile-normalized expression matrix in counts per million (CPM)
+uq <- cpm(raw_counts, lib.size = lbs_uq * colSums(raw_counts))
+```
+
+### Boxplot
+
+Expression matrix visualization after normalization using boxplot.
+
+```{r}
+boxplot(log2(raw_counts + 1), outline = FALSE,  las=2,
+        ylab = "log(count+1)", main = "Figure 18. Before normalization", xaxt = 'n')
+
+boxplot(log2(rle + 1), outline=FALSE,  las=2,
+        ylab = "log(count+1)", main = "Figure 19. Boxplot RLE", xaxt = 'n')
+
+boxplot(log2(tmm + 1), outline=FALSE,  las=2,
+        ylab = "log(count+1)", main = "Figure 20. Boxplot TMM", xaxt = 'n')
+
+boxplot(log2(uq + 1), outline=FALSE,  las=2,
+        ylab = "log(count+1)", main = "Figure 21. Boxplot Upper quartile", xaxt = 'n')
+
+```
+
+### RLE plot
+
+Expression matrix visualization after normalization using RLE plot.
+
+```{r}
+
+EDASeq::plotRLE(raw_counts, outline = FALSE,  las=2, col=col,
+        ylab = "RLE", main = "Figure 22. RLE before normalization", xaxt='n')
+
+EDASeq::plotRLE(tmm, outline = FALSE,  las=2, col=col,
+        ylab = "RLE", main = "Figure 23. RLE TMM", xaxt='n')
+
+EDASeq::plotRLE(rle, outline = FALSE,  las=2, col=col,
+        ylab = "RLE", main = "Figure 24. RLE RLE", xaxt='n')
+
+EDASeq::plotRLE(uq, outline = FALSE,  las=2, col=col,
+        ylab = "RLE", main = "Figure 25. RLE upper quartile", xaxt='n')
+
+```
+
+As mentioned previously, three normalization approaches were evaluated in this analysis: RLE, TMM, and Upper Quartile. RLE normalizes samples using median expression ratios under the assumption that most genes are not differentially expressed, TMM corrects composition bias by reducing the influence of extremely expressed genes, and Upper Quartile normalization scales samples using the upper portion of the count distribution to reduce the effect of low and extreme counts.
+
+As observed in the literature, the TMM method appears to provide an effective normalization approach because it corrects technical variation without introducing overly strong adjustments to the data. This can be observed in Figure 20 (Boxplot TMM) and Figure 23 (RLE Plot TMM), where the sample distributions appear more aligned and centered after normalization. Based on these results, TMM was selected as the most suitable normalization method for downstream differential gene expression analysis.
+
+
+## Correlation plot
+
+Given the TMM normalization, we visualize the correlation plot, estimating the Pearson correlation index matrix with the `corrplot` function:
+
+```{r}
+# Check dimensions of the TMM-normalized matrix
+dim(tmm)
+
+# Save original sample names from tmm because we will have to convert them to numerical values for plotting
+sample_names <- colnames(tmm)
+
+# Rename tmm samples numerically for clearer labels on the plot
+colnames(tmm) <- as.character(seq_len(ncol(tmm)))
+
+# Compute sample-to-sample correlation matrix
+m <- cor(log1p(tmm))
+
+# Plot correlation heatmap with visible sample labels
+corrplot(
+  m,
+  method = "color",
+  order = "hclust",
+  tl.pos = "lt",
+  tl.cex = 0.2,
+  tl.col = "black",
+  title = "Figure 26. Sample-to-Sample Correlation Heatmap After TMM Normalization",
+  mar = c(1, 1, 3, 1)
+)
+
+# Restore original tmm sample names (i.e., we are done plotting, we do not need numerical values for samples' labels)
+colnames(tmm) <- sample_names
+```
+
+As shown in Figure 26, all pairs of samples displayed high correlation values, with no evident outlier samples observed within the cohort. The strong correlations between samples suggest that the dataset is technically consistent and biologically coherent, indicating that the RNA-seq libraries were processed similarly and are not strongly affected by technical noise or batch effects.
+
+In RNA-seq datasets, most genes are generally expected to exhibit similar expression patterns across samples, while only a subset of genes show major biological differences. Therefore, the high overall correlation observed after TMM normalization increases confidence that downstream analyses, such as PCA, clustering, and differential gene expression, are mainly driven by biological variation rather than technical artifacts.
+
+
+### PCA with TMM normalization method
+
+```{r}
+#Q.C: Number of components contributing to the variance
+
+# Perform PCA on the log1p-transformed TMM-normalized expression matrix
+# t() transposes the matrix so samples become rows and genes become columns
+breastcancer_pca_tmm <- prcomp(t(log1p(tmm)))
+
+# Generate a summary of the PCA results
+tmp_tmm <- summary(breastcancer_pca_tmm)
+
+# Display the proportion of variance explained by the first 35 principal components
+tmp_tmm$importance[, 1:35]
+```
+
+The first principal components explained the largest proportion of variance in the dataset, with PC1 and PC2 together accounting for approximately 30% of the total variability in gene expression.
+
+A PCA plot was subsequently generated using the TMM-normalized data, where ER and TNBC samples were differentiated according to subtype using distinct colors.
+
+```{r}
+# make sure group is a factor in the correct order
+colData(breastcancer_sel)$group <- factor(colData(breastcancer_sel)$group,
+                                      levels = c("ER", "TNBC"))
+
+# PCA plot colored by cancer type
+autoplot(
+  breastcancer_pca_tmm,
+  data = as.data.frame(colData(breastcancer_sel)),
+  colour = "group",
+  size = 3
+) +
+  labs(title = "Figure 27. PCA of TNBC and ER samples after TMM normalization",
+       colour = "Cancer type") +
+  theme_bw()
+```
+
+Comparison between Figure 5 (PCA before normalization) and Figure 27 (PCA after TMM normalization) shows that normalization substantially changed the variance structure of the dataset. After TMM normalization, the proportion of variance explained by PC1 increased from 9.31% to 18.06%, while the variance explained by PC2 increased from 6.51% to 11.93%.
+
+These changes suggest that normalization successfully reduced technical variation and improved the representation of biologically meaningful differences within the dataset. As a result, the principal components captured a larger proportion of the true gene expression variability between ER and TNBC samples after normalization.
+
+
+# Inference with edgeR
+
+Before proceeding with differential gene expression analysis using edgeR, the biological groups corresponding to the two breast cancer subtypes of interest, Triple Negative Breast Cancer (TNBC) and Estrogen Receptor Positive (ER+), were reintroduced from the previously processed breastcancer dataset. The dataset was then inspected to confirm the presence of the two groups, with 42 samples retained for both the ER and TNBC subtypes.
+
+```{r, message=FALSE}
+table(breastcancer_sel$group)
+```
+
+# Exploring the mean-variance relationship
+
+First we explored the mean-variance relationship on the breastcancer dataset. In RNA-seq data the variance is typically larger than the mean, a phenomenon called overdispersion. The distribution for over-dispersed counts is the Negative Binomial distribution (NB), where $Var(Y)=μ+ϕμ^2$ (quadratic relationship between the mean and the variance).
+
+The estimated dispersion was computed with *edgeR* package.
+
+```{r, message=FALSE}
+design <- model.matrix(~ group, data = colData(breastcancer_sel))
+head(design)
+```
+
+The design matrix is a table that tells which sample belongs to which group. For this specific analysis we have two groups. As we can see above group TNBC belongs to group 0, on the other hand, ER belongs to group 1.
+
+The dge object created below is a special object from the `edgeR` package. It takes the breastcancer_sel raw counts and organizes them into a structure that `edgeR` can use. Initially, it contains:
+* counts matrix (rows = genes, columns = samples)
+* library sizes (total reads per sample)
+* After later steps, it will also contain: normalization factors, dispersion estimates, model results.
+
+`edgeR` package requires the dge object to later run:
+* calcNormFactors()
+* estimateDisp()
+* glmFit()
+
+```{r}
+# Create a DGEList object
+dge <- DGEList(assay(breastcancer_sel, "raw_counts")) 
+```
+
+In addition, scaling factors were computed below using the `calcNormFactors()` function to convert the observed library sizes into normalized values.
+
+The effective library sizes used in downstream analyses are calculated as lib.size * norm.factors, where lib.size contains the original library sizes and norm.factors is the vector of scaling factors computed by this function. The effective library sizes are incorporated into the model that estimates dispersion. The function `plotMeanVar(`) in `edgeR` is used to visualize the relationship between gene expression levels (mean) and variability (variance). 
+
+```{r}
+dge <- calcNormFactors(dge, method="TMM") #using normalized counts by TMM scaling factors
+dge <- estimateDisp(dge, design) 
+
+plotMeanVar(dge,
+            show.raw.vars = TRUE,
+            show.ave.raw.vars = FALSE,
+            NBline = TRUE,
+            show.tagwise.vars = TRUE,
+            main = "Figure 28. Mean–Variance Relationship in RNA-seq Data (TMM Normalized)")
+# show.raw.vars = TRUE -> raw variances: directly from counts before modeling
+# show.tagwise.vars = TRUE -> modeled variances: after dispersion estimation (i.e., Negative Binomial)
+
+legend("topleft",
+       legend = c("Raw variances",
+                  "Tagwise (NB) variances",
+                  "Negative Binomial trend",
+                  "Poisson (Var = Mean)"),
+       col = c("grey", "lightblue", "blue", "black"),
+       pch = c(16, 16, NA, NA),
+       lty = c(NA, NA, 1, 1),
+       bty = "n")
+
+```
+
+As shown in figure 28, each point represents a gene, showing how its average expression relates to its variability. Most genes lie above the black Poisson line, meaning the data are more variable than expected and show overdispersion. The blue line (Negative Binomial) follows the data much better, indicating it is a more appropriate model for RNA-seq counts. This confirms that using a Negative Binomial model with dispersion estimates is necessary for accurate differential expression analysis.
+
+# Identification of differentially expressed genes
+
+We fit a Negative Binomial generalized linear model (GLM) to the count data for each gene using glmFit(). After normalization, the counts are effectively adjusted through scaling factors. To account for these normalized library sizes, an offset is included in the GLM: $log(E[Y|X]) = X\beta + O$, where $log(E[Y|X])$ is the link function for negative binomial distribution and $X\beta$ represents the linear predictor, and $O$ is the offset that incorporates the effective library sizes.
+
+```{r, message=FALSE}
+# Negative Binomial generalized linear model (GLM) for each gene using the experimental design matrix (ER vs TNBC)
+fit <- glmFit(dge, design)
+
+# Display the offset values for the first 20 samples after normalization
+fit$offset[,1:20]
+```
+
+Once the model parameters have been estimated, we can perform the differential expression test for each gene, using the glmLRT() function. By specifying coef = 2 (er =0 vs tnbc = 1), the null hypothesis is $H0:\beta_2=0$, which tests whether the effect of this condition is significantly different from zero. Bellow are ten differentially expressed genes sorted by log fold-change (logFC), using the `topTags()` function:
+
+```{r, message=FALSE}
+
+# Perform a likelihood ratio test (LRT) on the TNBC coefficient for each gene
+res <- glmLRT(fit, coef=2)
+
+# Display the top differentially expressed genes sorted by log fold-change (logFC)
+topTags(res, sort.by="logFC")
+```
+
+For each gene:
+
+-   *logFC* measures how much the gene changes between the two condition.
+* Positive → gene is higher in TNBC
+* Negative → gene is higher in ER 
+
+-   *logCPM* is the average expression.
+* How much the gene is expressed overall
+* Higher values = more reliable signal
+
+-   *LR* is the test statistic.
+* Strength of evidence against null
+* Higher values = stronger difference
+
+-   *P-value* is the p-value.
+* Probability the difference is by chance
+* Very small values = strong evidence
+
+-   *FDR* is adjusted p-value (multiple testing).
+* Corrected for multiple testing
+* < 0.05 : significant gene
+
+For example, gene ENSG00000171209.3 shows a very high positive logFC (10.97), indicating substantially higher expression in TNBC compared to ER samples. In addition, the extremely small P-value and FDR provide strong evidence that this gene is significantly differentially expressed between the two breast cancer subtypes.
+
+In addition, an object named `tab` was created to store and visualize the differentially expressed genes identified from the edgeR analysis. The topTags() function was used to extract all genes ranked according to statistical significance, including genes with an FDR threshold below 0.05.
+
+```{r, message=FALSE}
+
+# Extract all differentially expressed genes identified from the edgeR analysis
+tab <- topTags(res, n=Inf)
+
+# Store the differential expression results as a table
+tab <- tab$table
+
+# Display the first rows of the differential expression table
+head(tab)
+
+#Check dimensions of tab
+dim(tab)
+```
+
+Moreover, a new object named de was created to retain only significantly differentially expressed genes identified from the edgeR analysis using an FDR threshold below 0.05.
+
+```{r}
+# Extract differentially expressed genes with an FDR threshold below 0.05.
+de <- tab[tab$FDR <0.05,]
+
+#Check dimensions of de
+dim(de)
+```
+
+While the dge object retained all 26772 genes together with normalization and dispersion estimates, the de object filtered this set to 11517 significantly differentially expressed genes based on the selected statistical threshold.
+
+# DEGs exploration
+
+## MD plot
+
+First, the MD plot was visualized, comparing the log-fold changes (*logFC) with the average log counts per million (logCPM*). Black points correspond to non-significant genes, while red and blue points indicate up- and down-regulated genes, respectively.
+
+```{r, message=FALSE}
+plotMD(res,
+       main = "Figure 29. MD Plot: Differential Expression (TNBC vs ER)",
+       xlab = "Average expression (logCPM)",
+       ylab = "Log Fold Change (TNBC vs ER)")
+```
+
+Figure 29 shows how gene expression differs between TNBC and ER samples. Red points are genes expressed higher in TNBC, blue points are higher in ER, and black points are not significantly different. A large number of significant genes show positive or negative logFC values, indicating strong differential expression. Hence, there is a clear biological separation between the two cancer types.
+
+## Volcano plot
+
+A volcano plot is a graphical representation of *logFC* vs *-log10(PValue)* with the possibility to highlight some genes of interest.
+```{r}
+
+# Store the names of significantly differentially expressed genes
+names <- row.names(de)
+
+# Create a new column to classify genes according to expression direction
+tab$sign <- NA
+
+# Label genes with negative logFC as downregulated and upregulated
+tab$sign[tab$logFC < 0] <- "ER"
+tab$sign[tab$logFC > 0] <- "TNBC"
+
+# Label non-significant genes based on FDR threshold
+tab$sign[tab$FDR >= 0.05] <- "NoSig"
+
+# Store gene names as a separate column for labeling in the plot
+tab$gene <- rownames(tab)
+
+ggplot(tab, aes(x = logFC,y = -log10(PValue),color = sign)) + geom_point() +  theme_classic() +scale_color_manual(values = c("ER" = "blue", "TNBC" = "red", "NoSig" = "black")) + geom_text_repel(data = tab[1:20, ],aes(label = gene),size = 2.5,max.overlaps = 20) +labs(title = "Figure 30. Volcano Plot of Differentially Expressed Genes", x = "logFC", y = "-log10(PValue)", color = "Expression")
+```
+
+Figure 30 shows differential expression between TNBC and ER. Genes far on the left or right (x-axis) have large differences in expression (high absolute logFC), while genes higher on the y-axis are more statistically significant (lower p-values). Red genes are higher in TNBC, blue genes are higher in ER, and black genes are not significant.
+
+## P-value distribution
+
+Last, the distribution of the p-values were revised. In an unbiased situation, there is a peak on low values mixed with a uniform distribution. 
+
+```{r, message=FALSE}
+hist(tab$PValue, main="Figure 31. p-values distribution")
+```
+Figure 31 shows that there is a large peak near 0, meaning many genes have very small p-values and are likely truly differentially expressed. The rest of the p-values are spread roughly uniformly between 0 and 1, which is expected for genes with no real difference. In conclusion, this indicates a good and reliable analysis with real biological signal, not just random noise.
+
+## Cluster Analysis
+
+In genomics, cluster analyses are used in the exploratory analysis phase (QC control) and results exploration. It is particularly useful for identifying genes and patients with similar expression profiles.
+
+### Heatmaps
+
+First, the TMM-normalized matrix with differentially expressed genes were illustrated.
+
+```{r}
+raw_counts <- assay(breastcancer_sel, "raw_counts")
+tmm <- cpm(raw_counts, lib.size = lbs_tmm * colSums(raw_counts))
+
+breastcancer_degs <- tmm[names, ]
+```
+
+To visualize a heatmap, the pheatmap() function from the *pheatmap* package was used. The scale="row" option helps interpret the data by centering and scaling each gene—dividing its values by the mean across all patients—so that relative expression patterns are easier to compare.
+
+```{r, message=FALSE}
+Col <- data.frame(Subtype=breastcancer_sel$group)
+rownames(Col) <- colnames(breastcancer_sel)
+
+ann_colors = list(Subtype = c("ER"="blue","TNBC"="lightblue"))
+
+g <- pheatmap(log1p(breastcancer_degs), show_colnames = FALSE, scale = "row", show_rownames = FALSE,
+         drop_levels = TRUE, annotation_colors = ann_colors, annotation_col = Col, main = "Figure 32. Expression Patterns Heatmap")
+```
+
+Figure 32 shows the expression patterns of differentially expressed genes across all samples (after normalization and scaling). Rows represent genes and columns represent samples, with colors indicating relative expression levels (red = higher, blue = lower compared to the gene’s average). The clustering groups samples with similar expression profiles, and we can see a clear separation between ER and TNBC samples.
+
+In conclusion, the differentially expressed genes successfully distinguish between the two cancer subtypes, confirming strong biological differences in gene expression between ER and TNBC.
+
+### Silhouette index
+
+The tree was segmented into 2 clusters (i.e., two cancer subtypes groups: ER and TNBC) and computed the distance matrix using the normalized matrix. To evaluate the performance of the clustering the *silhouette index* was used through the silhouette() function from *cluster* package. The silhouette index measures how well each sample fits into its assigned cluster compared to other clusters. For each sample $i$,
+
+$s(i) = \frac{b(i) - a(i)}{\max\{a(i),\, b(i)\}}$,
+
+where $a(i)$ is average distance to all other points in the same cluster and $b(i)$ is average distance to points in the nearest different cluster.
+
+```{r, message=FALSE}
+cut <- cutree(g$tree_col, k = 2)
+
+dist_mat <- dist(t(log1p(breastcancer_degs)))
+plot(silhouette(cut, dist_mat), col=c("#2E86C1", "#EC7063"), border=NA, main = "Figure 33. Silhouette plot")
+```
+
+The silhouette analysis yields a low average value (~0.19), indicating weak clustering. This suggests that TNBC and ER+ samples are not well separated based on their overall gene expression profiles. The observed overlap highlights the shared biological features between these two breast cancer subtypes, despite their known clinical differences. A stronger separation would likely be observed when comparing normal tissue to cancer tissue, where gene expression differences are more pronounced. In this case, both groups represent breast cancer samples, although with differing levels of aggressiveness. Hence, their transcriptional profiles remain relatively similar, resulting in limited clustering separation.
+
+# Gene Enrichment Analysis
+
+For functional enrichment analysis, Ensembl gene identifiers were first converted to Entrez gene identifiers, since annotation databases such as KEGG and Gene Ontology primarily use Entrez IDs for pathway analysis.
+
+```{r}
+# Remove gene version numbers from tab and de objects 
+rownames(tab) <- sub("\\..*", "", rownames(tab))
+rownames(de) <- sub("\\..*", "", rownames(de))
+
+# Extract all gene IDs from the full DE results (all tested genes)
+universo <- row.names(tab)  
+
+# Extract gene IDs from the significant DEGs to genes of interest
+sign <- row.names(de)  
+
+# Convert all genes from Ensembl IDs to Entrez IDs using the human annotation database
+universo.entrez <- mapIds(org.Hs.eg.db,
+                    keys = universo,
+                    column = "ENTREZID",
+                    keytype = "ENSEMBL")  
+
+# Convert DEGs from Ensembl IDs to Entrez IDs
+sign.entrez <- mapIds(org.Hs.eg.db,
+                    keys = sign,
+                    column = "ENTREZID",
+                    keytype = "ENSEMBL")  
+
+# Convert the mapped IDs to a simple character vector
+universo.entrez <- as.character(universo.entrez)  
+
+# Convert DEG IDs to character format
+sign.entrez <- as.character(sign.entrez)  
+
+# Count how many DEGs were successfully mapped to Entrez IDs
+length(sign.entrez)  
+
+# Count how many total genes were successfully mapped to Entrez IDs
+length(universo.entrez)  
+```
+
+The resulting DEG list (sign.entrez) contained 11,517 mapped genes, while the complete background gene list (universo.entrez) contained 26,772 mapped genes. These gene sets were used for downstream enrichment analyses. ORA used only the significant DEGs, whereas GSEA and limma camera used all quantified genes from the complete expression dataset.
+
+## KEGG Pathway-Level Enrichment Analysis with limma camera
+
+The first enrichment method applied was the camera function from the limma package, which evaluates pathway enrichment across the full normalized expression matrix rather than only significant DEGs.
+
+```{r}
+# Extract normalized logCPM values from edgeR object
+logCPM_limma <- cpm(dge, log = TRUE, prior.count = 1)
+
+# Remove gene version numbers
+rownames(logCPM_limma) <- sub("\\..*", "", rownames(logCPM_limma))
+
+# Match Entrez IDs to the rownames of logCPM_limma
+entrez_ids_limma <- universo.entrez[match(rownames(logCPM_limma), universo)]
+
+# Replace row names with Entrez IDs
+rownames(logCPM_limma) <- entrez_ids_limma
+
+# Remove genes without Entrez ID
+logCPM_limma <- logCPM_limma[!is.na(rownames(logCPM_limma)), ]
+
+# Remove duplicated Entrez IDs
+logCPM_limma <- logCPM_limma[!duplicated(rownames(logCPM_limma)), ]
+
+# Download KEGG pathway-gene links for human
+kegg_link <- KEGGREST::keggLink("pathway", "hsa")
+
+# Clean KEGG pathway and gene IDs
+kegg_pathways <- sub("path:", "", kegg_link)
+kegg_genes <- sub("hsa:", "", names(kegg_link))
+
+# Create KEGG gene sets
+kegg_sets <- split(kegg_genes, kegg_pathways)
+
+# Run limma camera pathway analysis
+camera_results <- camera(
+  y = logCPM_limma,
+  index = kegg_sets,
+  design = design,
+  contrast = 2
+)
+
+# Add KEGG pathway names
+kegg_names <- KEGGREST::keggList("pathway", "hsa")
+
+kegg_names_df <- data.frame(
+  Pathway_ID = sub("path:", "", names(kegg_names)),
+  Pathway_Name = as.character(kegg_names)
+)
+
+camera_results$Pathway_ID <- rownames(camera_results)
+
+camera_results_named <- merge(
+  camera_results,
+  kegg_names_df,
+  by = "Pathway_ID",
+  all.x = TRUE
+)
+
+# Order results by FDR
+camera_results_named <- camera_results_named[order(camera_results_named$FDR), ]
+
+# Select top 15 pathways
+top_camera <- camera_results_named[1:15, ]
+
+# Plot top KEGG pathways
+ggplot(top_camera, aes(
+  x = reorder(Pathway_Name, -log10(FDR)),
+  y = -log10(FDR)
+)) +
+  geom_col() +
+  coord_flip() +
+  labs(
+    title = "Fig 34. Top KEGG Pathways",
+    x = "KEGG pathway",
+    y = "-log10(FDR)"
+  ) +
+  theme_bw()
+```
+
+The limma camera analysis identified several KEGG pathways whose overall gene expression profiles differed significantly between ER+ and TNBC breast cancer samples. The most significant pathways included Ribosome, Cell Cycle, DNA Replication, Oxidative Phosphorylation, and multiple immune-related pathways, suggesting that protein synthesis, proliferation, metabolism, and immune-associated biological processes contribute to the transcriptional differences observed between the two breast cancer subtypes.
+
+To further understand how these pathways were associated with each breast cancer subtype, a GSEA analysis was performed. This approach allowed us to evaluate whether specific pathways were more strongly enriched in ER+ or TNBC samples.
+
+# GSEA (Gene Set Enrichment Analysis) method
+
+Gene Set Enrichment Analysis (GSEA) was subsequently performed to further investigate whether specific biological pathways were more strongly associated with ER+ or TNBC samples. This method analyzes the complete ranked gene expression dataset rather than focusing only on highly significant genes. Genes are ranked according to a continuous statistical measure, such as log fold-change (logFC), and the analysis evaluates whether genes belonging to a particular pathway tend to accumulate toward the top or bottom of the ranked list more frequently than expected by chance. This approach improves the detection of coordinated biological changes occurring across entire pathways.
+
+```{r}
+
+# Extract log fold-change (logFC) values for all analyzed genes from the differential expression results table
+tt <- tab$logFC  
+
+# Assign Entrez gene identifiers as names to each logFC value. This creates the geneID to statistic format required for GSEA
+names(tt) <- universo.entrez  
+
+# Check for duplicated Entrez gene IDs
+table(duplicated(names(tt))) 
+
+# Remove duplicated gene IDs to retain one value per gene
+tt <- tt[!duplicated(names(tt))] # Remove duplicated gene IDs
+
+# Sort genes from highest to lowest logFC values. # Genes at the top are the most upregulated in TNBC relative to ER, while genes at the bottom are the most downregulated
+sort_tt <- sort(tt, decreasing = TRUE)  
+
+# Print first 10 genes
+sort_tt[0:11]
+```
+
+The ranked gene list generated for GSEA contains all analyzed genes ordered according to their log fold-change values. Genes appearing at the top of the ranked list correspond to the most upregulated genes in TNBC relative to ER+ samples, whereas genes at the bottom correspond to the most downregulated genes. This ranked structure serves as the input for GSEA to determine whether genes belonging to specific biological pathways tend to accumulate preferentially among highly upregulated or downregulated genes.
+
+## KEGG Pathway with GSEA
+
+Using the ranked gene list generated from the differential expression analysis, Gene Set Enrichment Analysis (GSEA) was performed with the Kyoto Encyclopedia of Genes and Genomes (KEGG) pathway database to identify biological pathways whose genes tend to accumulate among the most upregulated or downregulated genes in the dataset. The analysis was implemented using the gseKEGG() function.
+
+```{r}
+# Run GSEA using the ranked list of all genes (logFC-based)
+kk_gsea <- gseKEGG(geneList = sort_tt,  
+              # Specify human KEGG pathways
+              organism = "hsa",   
+              
+               # Keep only significantly enriched pathways
+              pvalueCutoff = 0.05)     
+
+ # Display top enriched pathways
+kk_gsea@result[1:10, 1:7]                    
+```
+
+For clearer interpretation, separate tables were generated for the most significant ER-like and TNBC-like pathways. For visualization purposes, only the top 10 pathways from each group were selected.
+
+```{r}
+library(dplyr)
+library(knitr)
+
+# Extract GSEA results
+gsea_table <- kk_gsea@result %>%
+  as.data.frame() %>%
+  dplyr::select(Description, setSize, NES, pvalue, p.adjust) %>%
+  dplyr::arrange(p.adjust)
+
+# Top TNBC-enriched pathways (Positive NES)
+tnbc_gsea <- gsea_table %>%
+  filter(NES > 0) %>%
+  dplyr::arrange(desc(NES)) %>%
+  head(10)
+
+# Top ER-enriched pathways (Negative NES)
+er_gsea <- gsea_table %>%
+  filter(NES < 0) %>%
+  dplyr::arrange(NES) %>%
+  head(10)
+
+# TNBC-associated pathways table
+kable(
+  tnbc_gsea,
+  caption = "Table 1. Top TNBC-Enriched KEGG Pathways from GSEA (Positive NES = TNBC-associated)"
+)
+
+# ER-associated pathways table
+kable(
+  er_gsea,
+  caption = "Table 2. Top ER-Enriched KEGG Pathways from GSEA (Negative NES = ER-associated)"
+)
+```
+
+In addition, a bar plot was generated to visually summarize the top ER-like and TNBC-like pathways presented in Tables 1 and 2.
+
+```{r}
+library(dplyr)
+library(ggplot2)
+
+# Extract GSEA results
+gsea_plot_df <- kk_gsea@result %>%
+  as.data.frame() %>%
+  dplyr::select(Description, NES, pvalue, p.adjust) %>%
+  mutate(
+    Direction = ifelse(NES > 0, "TNBC-like pathway", "ER-like pathway")
+  )
+
+# Select top 5 TNBC-like and top 5 ER-like pathways
+top_gsea_plot <- bind_rows(
+  gsea_plot_df %>%
+    filter(NES > 0) %>%
+    arrange(desc(NES)) %>%
+    head(10),
+  
+  gsea_plot_df %>%
+    filter(NES < 0) %>%
+    arrange(NES) %>%
+    head(10)
+)
+
+# Plot by NES, colored by direction
+ggplot(top_gsea_plot,
+       aes(x = reorder(Description, NES),
+           y = NES,
+           fill = Direction)) +
+  geom_col() +
+  coord_flip() +
+  labs(
+    title = "Fig 35. Top GSEA KEGG Pathways",
+    x = "KEGG pathway",
+    y = "Normalized Enrichment Score (NES)",
+    fill = "Pathway direction"
+  ) +
+  theme_bw()
+```
+
+The GSEA analysis identified several significantly enriched KEGG pathways across the ranked gene expression dataset. The main result of GSEA is the Normalized Enrichment Score (NES), which indicates both the direction and strength of pathway enrichment. Positive NES values correspond to TNBC-associated pathways, while negative NES values correspond to ER-associated pathways.
+
+For clearer interpretation, separate tables were generated for the top TNBC-like and ER-like enriched pathways (Tables 1 and 2). TNBC-associated pathways included Cell cycle, Ribosome, Rheumatoid arthritis, and Cytokine-cytokine receptor interaction, suggesting increased cellular proliferation, protein synthesis, and immune-related activity in TNBC samples. In contrast, ER-associated pathways included Metabolism of xenobiotics by cytochrome P450, Drug metabolism - cytochrome P450, and Ascorbate and aldarate metabolism, indicating enrichment of metabolic and detoxification-related processes in ER+ samples.
+
+Figure 35 summarizes the top enriched pathways identified by GSEA using NES values. Pathways with positive NES values are visualized as TNBC-like pathways, while pathways with negative NES values are visualized as ER-like pathways, allowing clearer comparison of subtype-associated biological processes.
+
+GSEA KEGG analysis showed that TNBC samples were more strongly enriched for pathways related to ribosome activity, cell cycle regulation, and immune-associated signaling, suggesting increased proliferative, protein synthesis, and inflammatory activity compared to ER+ breast cancer samples. In contrast, ER+ pathways were more associated with metabolic and signaling-related biological processes.
+
+
+## GO categories with GSEA
+
+Gene Set Enrichment Analysis (GSEA) was subsequently performed using the Gene Ontology Biological Process (GO-BP) database to further investigate biological functions associated with transcriptomic differences between TNBC and ER+ breast cancer samples. Similar to the KEGG-based GSEA analysis, this approach evaluates enrichment patterns across the complete ranked gene expression dataset rather than only significantly differentially expressed genes. This allows identification of biological processes whose associated genes tend to accumulate among highly upregulated or downregulated genes without requiring a strict DEG significance threshold.
+
+```{r, warning=FALSE, message=FALSE}
+# Run GSEA using the full logFC-ranked gene list against GO Biological Process gene sets
+gsea_GO <- gseGO(geneList = sort_tt,
+          ont = "BP",
+          OrgDb='org.Hs.eg.db',
+          keyType = "ENTREZID",
+          pAdjustMethod = "BH")
+
+# Store GSEA GO results as a dataframe
+gsea_GO_results <- gsea_GO@result
+
+# Display top 10 enriched GO terms with key statistics
+# gsea_GO_results
+```
+
+The GO-GSEA analysis identified multiple significantly enriched biological processes associated with transcriptomic differences between TNBC and ER+ breast cancer samples. Similar to the KEGG analysis, positively enriched GO terms were associated with TNBC, whereas negatively enriched terms were associated with ER+ breast cancer samples.
+
+To further summarize and directly compare the most strongly enriched GO biological processes, the top positively and negatively enriched terms were selected based on their enrichment scores and visualized in a comparative bar plot (Fig. 36).
+
+```{r}
+# Extract GSEA GO results
+gsea_GO_plot_df <- gsea_GO@result %>%
+  as.data.frame() %>%
+  dplyr::select(Description, NES, pvalue, p.adjust) %>%
+  mutate(
+    Direction = ifelse(NES > 0, "TNBC-like pathway", "ER-like pathway")
+  )
+
+# Select top positively and negatively enriched GO terms
+top_gsea_GO_plot <- bind_rows(
+  gsea_GO_plot_df %>%
+    filter(NES > 0) %>%
+    arrange(desc(NES)) %>%
+    head(10),
+
+  gsea_GO_plot_df %>%
+    filter(NES < 0) %>%
+    arrange(NES) %>%
+    head(10)
+)
+
+# Plot GO GSEA results
+ggplot(top_gsea_GO_plot,
+       aes(x = reorder(Description, NES),
+           y = NES,
+           fill = Direction)) +
+  geom_col() +
+  coord_flip() +
+  labs(
+    title = "Fig 36. Top GSEA GO Biological Process Terms",
+    x = "GO Biological Process",
+    y = "Normalized Enrichment Score (NES)",
+    fill = "Pathway direction"
+  ) +
+  theme_bw()
+```
+
+Figure 36 presents the top enriched GO Biological Process terms identified by GSEA, separated into TNBC-like (positive enrichment) and ER-like (negative enrichment) categories according to their enrichment direction.
+
+TNBC-associated GO terms were mainly related to immune-related and cell interaction processes, including leukocyte-mediated activity, cell-cell adhesion, and immune response regulation. These results suggest an association between TNBC samples and biological processes involved in immune activity and inflammatory signaling.
+
+In contrast, ER-associated GO terms were mainly related to epithelial structure, organization, and cellular differentiation. These findings suggest an association between ER+ breast cancer samples and biological processes involved in epithelial maintenance and differentiated cellular functions.
+
+Hence, the visualization highlights that TNBC-related genes are associated with immune and interaction-related processes, while ER+ breast cancer-related genes are associated with epithelial organization. These findings are consistent with the KEGG GSEA results.
+
+Overall, both Camera Limma and GSEA analyses revealed that the transcriptional differences between TNBC and ER+ breast cancer samples are primarily associated with immune-related, inflammatory, and proliferative biological processes. Enrichment of pathways related to NF-kappa B signaling, T cell activation, cytokine signaling, cell cycle regulation, and Ribosome activity suggests increased immune signaling, cellular proliferation, and protein synthesis in TNBC samples, consistent with the more aggressive biological characteristics of this breast cancer subtype.
+
+
+# Gene Set Analysis with ORA Method 
+Over-Representation Analysis (ORA) tests whether a gene set is statistically overrepresented within a list of differentially expressed genes (DEGs) compared to what would be expected by chance, given the size of the background universe. 
+
+To identify enriched biological pathways and functional categories within the DEG list, the clusterProfiler package is used through the functions enrichKEGG() for KEGG pathways and enrichGO() for Gene Ontology categories. These enrichment methods implement the Fisher exact test to determine whether specific pathways or biological functions are significantly overrepresented among the DEGs compared to the background gene universe.
+
+## KEGG pathways with ORA Method 
+KEGG pathway enrichment analysis is performed using the Over-Representation Analysis (ORA) method to determine whether the differentially expressed genes (DEGs) are significantly enriched in known biological pathways compared to the complete set of analyzed genes. This analysis identifies pathways containing a higher number of DEGs than expected by chance and returns a table of significantly enriched pathways together with their associated statistical significance values.
+
+Using the Entrez gene identifier vectors generated previously for both the DEG list and the background gene universe, enrichment scores can then be estimated across all available Kyoto Encyclopedia of Genes and Genomes (KEGG) pathways.
+
+```{r}
+# Perform KEGG Over-Representation Analysis (ORA) using significant DEGs
+ora_kkeg <- enrichKEGG(gene = sign.entrez,
+                       universe = universo.entrez,
+                       organism = 'hsa',
+                       keyType = 'ncbi-geneid',
+                       pvalueCutoff = 0.05,
+                       pAdjustMethod = "BH")
+
+# View dimensions of enrichment results table
+dim(ora_kkeg@result)
+
+# Store KEGG enrichment results as a dataframe
+ora_kkeg_results <- ora_kkeg@result
+
+# Order pathways by adjusted p-value (most significant first)
+ora_kkeg_results <- ora_kkeg_results[order(ora_kkeg_results$p.adjust), ]
+
+# Table 1. Significantly enriched KEGG pathways identified between TNBC and ER+ breast cancer samples
+Table1_KEGG_Pathways <- ora_kkeg_results[, c("Description",
+                                             "GeneRatio",
+                                             "Count",
+                                             "p.adjust",
+                                             "geneID")]
+# Table1_KEGG_Pathways
+```
+
+Several measurements were extracted to evaluate pathway enrichment, including Description, GeneRatio, Count, adjusted p-value (p.adjust), and geneID. Description indicates the name of the enriched KEGG pathway. GeneRatio represents the fraction of differentially expressed genes (DEGs) associated with a given pathway, where higher values indicate greater DEG involvement in that biological process. Count corresponds to the number of DEGs found within the pathway. The adjusted p-value (p.adjust) represents the statistical significance after Benjamini–Hochberg multiple testing correction, with values below 0.05 considered statistically significant. Finally, geneID lists the specific DEGs contributing to the enrichment of each pathway.
+
+To further facilitate interpretation of the KEGG over-representation analysis (ORA) results, several visualization methods were generated using the KEGG pathway annotation database. These plots were used to summarize enriched pathways, visualize pathway significance and DEG involvement, identify shared genes across pathways, and explore relationships among enriched biological processes between TNBC and ER+ breast cancer samples.
+
+```{r}
+# Fig 37. Barplot of Significantly Enriched KEGG Pathways Ranked by DEG Counts
+barplot(ora_kkeg) +
+  ggtitle("Fig 37. Enriched KEGG Pathways Ranked by DEG Counts")
+
+# Fig 38. Dotplot of Significantly Enriched KEGG Pathways
+dotplot(ora_kkeg) +
+  ggtitle("Fig 38. Dotplot of Significantly Enriched KEGG Pathways")
+```
+
+The bar plot (Fig. 37) showed that multiple enrichment approaches consistently identified ribosome-, immune-, and signaling-related pathways as major contributors to the transcriptomic differences between ER+ and TNBC breast cancer samples, with GSEA further suggesting stronger enrichment of several of these pathways in TNBC samples.
+
+The dot plot (Fig. 38) further demonstrated that several immune and infection-associated pathways contained a high proportion of DEGs and strong statistical significance. Larger dots represented pathways with more associated genes, while darker colors indicated more significant enrichment values. Overall, the results support the involvement of immune response and cellular signaling pathways in the dataset.
+
+### KEGG Pathway Visualization and Interpretation Using ORA Results
+
+Among the significantly enriched pathways identified through KEGG over-representation analysis, the NF-kappa B signaling pathway and Ribosome pathway were selected for further visualization and interpretation due to their strong biological relevance to breast cancer. The NF-kappa B signaling pathway is associated with inflammation, immune signaling, tumor progression, and aggressive tumor behavior, while the Ribosome pathway is related to protein synthesis and increased cellular activity commonly observed in rapidly proliferating cancer cells.
+
+These pathways were prioritized because they provide a clearer biological interpretation of the transcriptional differences observed between TNBC and ER+ breast cancer samples compared to broader infection-associated pathways, which likely reflect overlapping immune and inflammatory gene signatures rather than disease-specific mechanisms.
+
+Furthermore, although the original study primarily focused on the identification of recurrent read-through fusion transcripts in breast cancer, several pathways identified in the present analysis, particularly NF-kappa B signaling and immune-related processes, are biologically consistent with mechanisms discussed in the original publication, including inflammatory signaling, cellular proliferation, and cancer-associated cellular activity.
+
+To further investigate the biological relevance of the enriched KEGG pathways, pathway visualization analysis was performed using the pathview package for the NF-kappa B signaling and Ribosome pathways. This approach maps differentially expressed genes (DEGs) directly onto KEGG pathway diagrams, allowing visualization of the specific genes contributing to pathway enrichment and their expression patterns within the biological pathway context.
+
+```{r, message=FALSE}
+# Figure 39. NK-kappa B Signaling Pathway
+ora_kkeg_results[ora_kkeg_results$ID == "hsa04064", ]
+
+pathview(gene.data = sign.entrez, pathway.id = "hsa04064", species = "hsa")
+knitr::include_graphics("hsa04064.pathview.png")
+```
+
+Visualization of the NF-kappa B signaling pathway showed that several genes associated with immune signaling and inflammatory responses were differentially expressed between TNBC and ER+ breast cancer samples. In this pathway diagram, each box represents a gene or signaling molecule involved in the NF-kappa B signaling cascade, while the connecting arrows and lines represent biological interactions and signaling events between pathway components. Red-colored boxes indicate genes identified as differentially expressed in the analysis, with darker red colors representing stronger relative upregulation, whereas gray or white boxes represent genes that were not significantly differentially expressed. Multiple components involved in signal transduction, transcriptional regulation, inflammation, and cellular survival appeared differentially expressed throughout the pathway. These findings suggest that immune-related and inflammatory biological processes may contribute to the transcriptional differences observed between the two breast cancer subtypes.
+
+```{r}
+# Figure 40. Ribosome Signaling Pathway
+ora_kkeg_results[ora_kkeg_results$ID == "hsa03010", ]
+
+pathview(gene.data = sign.entrez, pathway.id = "hsa03010", species = "hsa")
+knitr::include_graphics("hsa03010.pathview.png")
+```
+
+Visualization of the Ribosome pathway showed widespread differential expression of ribosome-associated genes between TNBC and ER+ breast cancer samples. In this pathway diagram, each box represents a ribosomal gene or ribosomal subunit component involved in protein synthesis, while the red-colored boxes indicate genes identified as differentially expressed in the analysis. Darker red colors represent stronger relative upregulation, whereas gray or white boxes represent genes that were not significantly differentially expressed. A large proportion of ribosomal genes appeared differentially expressed, particularly among proteins belonging to the small and large ribosomal subunits. These findings suggest that biological processes related to protein synthesis, cellular metabolism, and overall cellular activity may contribute to the transcriptional differences observed between the two breast cancer subtypes.
+
+
+## Gene Ontology categories with ORA Method 
+
+Gene Ontology (GO) enrichment analysis was performed using the Over-Representation Analysis (ORA) method to determine whether the differentially expressed genes (DEGs) are significantly enriched in specific biological functions compared to the complete set of analyzed genes. Unlike KEGG and Reactome, which organize genes into discrete biological pathways representing sequences of molecular interactions, GO describes gene attributes across three independent and complementary domains: Biological Process (BP), which captures the broader biological objectives a gene contributes to; Molecular Function (MF), which describes the biochemical activity of the gene product itself; and Cellular Component (CC), which specifies the subcellular location where the gene product operates.
+
+In this analysis, the Biological Process ontology was selected as the primary domain of interest, as it provides the most direct interpretation of transcriptional differences in terms of functional biological activity between TNBC and ER+ breast cancer samples. 
+
+```{r, message=FALSE}
+# Perform GO Over-Representation Analysis (ORA) using significant DEGs
+## Biological Process (BP) ontology selected to capture functional activity differences
+ora_go <- enrichGO(gene = sign.entrez,
+              universe = universo.entrez,
+              OrgDb = 'org.Hs.eg.db',
+              keyType = "ENTREZID",
+              ont = "BP",
+              pvalueCutoff = 0.05,
+              pAdjustMethod = "BH",
+              readable = TRUE)
+
+# View dimensions of the GO enrichment results table
+dim(ora_go@result)
+
+# Store GO enrichment results as a dataframe
+ora_go_results <- ora_go@result
+
+# Order GO terms by adjusted p-value (most significant first)
+ora_go_results <- ora_go_results[order(ora_go_results$p.adjust), ]
+
+# Table 2. Significantly enriched GO Biological Process terms identified between TNBC and ER+ breast cancer samples
+Table2_GO_BP_Terms <- ora_go_results[, c("Description",
+                                          "GeneRatio",
+                                          "Count",
+                                          "p.adjust",
+                                          "geneID")]
+# Table2_GO_BP_Terms
+```
+
+The Gene Ontology over-representation analysis (GO-ORA) results were summarized using the same statistical framework as KEGG ORA, including enrichment significance, gene overlap, and multiple testing correction. However, unlike pathway-based databases such as KEGG, GO terms describe broader biological functions rather than defined molecular interaction pathways.
+
+To further facilitate interpretation of the GO-ORA results, visualization methods were generated to summarize the most significantly enriched biological processes and to examine gene overlap between enriched GO terms identified in the TNBC versus ER+ breast cancer comparison.
+
+```{r}
+# Fig 41. Enriched GO Ranked by DEG Counts
+barplot(ora_go) +
+  ggtitle("Fig 41. Enriched GO Biological Process Ranked by DEG Counts")
+
+# Fig 42. UpSet Plot of Shared Genes Across GO Biological Processes
+upsetplot(ora_go, 5)
+```
+
+The bar plot (Fig. 41) highlights the most significantly enriched GO Biological Process terms based on the number of associated differentially expressed genes. Immune-related processes, including lymphocyte differentiation, regulation of T cell activation, leukocyte proliferation, and regulation of leukocyte cell-cell adhesion, were among the most enriched categories, demonstrating strong involvement of immune signaling pathways. The low adjusted p-values indicate robust statistical significance, supporting the conclusion that immune-associated biological mechanisms play an important role in the transcriptional differences observed between the breast cancer subtypes.
+
+The UpSet plot (Fig. 42) represents the intersection of genes shared between the most significantly enriched GO Biological Process categories. Considerable gene sharing is observed among pathways related to lymphocyte differentiation, leukocyte proliferation, mononuclear cell proliferation, and regulation of T cell activation, indicating that many differentially expressed genes contribute to multiple interconnected immune-related biological processes. These results suggest coordinated regulation of immune activation and lymphocyte-associated functions within the analyzed breast cancer transcriptomic profiles.
+
+
+### GO Biological Process Interpretation Using ORA Results
+
+GO over-representation analysis (ORA) of differentially expressed genes between TNBC and ER+ breast cancer samples revealed a strong and highly significant enrichment of immune-related biological processes. The most significantly enriched Gene Ontology (GO) terms were predominantly associated with adaptive immune system activity, lymphocyte regulation, and immune cell proliferation and differentiation.
+
+Among the top enriched biological processes were adaptive immune response (GO:0002250), T cell differentiation (GO:0030217), and regulation of T cell activation (GO:0050863), all of which showed strong statistical significance and involved a large proportion of input genes. These results indicate that the transcriptional differences between TNBC and ER+ samples are largely driven by immune system-related programs, particularly those linked to T cell biology and adaptive immune activation.
+
+Furthermore, terms related to immune cell interaction and signaling, such as leukocyte cell-cell adhesion (GO:0007159) and immune response–regulating receptor signaling pathways (GO:0002768), were also significantly enriched. These findings suggest enhanced immune cell communication and signaling activity within the tumor microenvironment.
+
+Overall, GO enrichment analysis indicates that the primary biological difference between TNBC and ER+ breast cancer samples is characterized by strong modulation of adaptive immune responses, particularly involving T cell activation, differentiation, and proliferation processes.
+
+
+# Comparative Analysis with the Original Study Findings
+
+To investigate whether genes involved in the recurrent fusion transcripts reported in the original study were also differentially expressed in the present analysis, Ensembl gene identifiers from the differential expression results table were converted to gene symbols using the org.Hs.eg.db annotation database. This step was necessary because the differential expression results were stored using Ensembl IDs as row names, whereas the genes of interest from the original publication were reported using gene symbols.
+
+```{r}
+# Convert Ensembl gene identifiers stored as row names into gene symbols and add them as a new column called SYMBOL in the DEG table
+de$SYMBOL <- mapIds(org.Hs.eg.db,
+                    
+                    # Use the Ensembl IDs from the row names of the DEG table
+                    keys = rownames(de),
+                    
+                    # Retrieve the official gene symbol annotation
+                    column = "SYMBOL",
+                    
+                    # Specify that the current IDs are Ensembl gene IDs
+                    keytype = "ENSEMBL",
+                    
+                    # If multiple mappings exist, keep only the first match
+                    multiVals = "first")
+
+# Display the first rows of the updated DEG table
+head(de)
+```
+After annotation, the differential expression table was created for the genes SCNN1A, TNFRSF1A, CTSD, and IFITM10, which are associated with the fusion transcripts SCNN1A-TNFRSF1A and CTSD-IFITM10 identified in the original study. This analysis does not detect the fusion transcripts directly, but instead evaluates whether the individual genes involved in those fusion events are differentially expressed between TNBC and ER+ breast cancer samples.
+
+```{r}
+# Define the genes involved in the fusion transcripts reported in the original publication
+fusion_genes <- c("SCNN1A", "TNFRSF1A", "CTSD", "IFITM10")
+
+# Extract rows from the DE table corresponding to the fusion-related genes using the newly added SYMBOL annotation column
+fusion_genes_de <- de[de$SYMBOL %in% fusion_genes, ]
+
+# Display the differential expression results for the fusion-associated genes
+fusion_genes_de
+```
+
+```{r}
+# Create clean table
+fusion_table <- fusion_genes_de[, c("SYMBOL", "logFC", "logCPM", "PValue", "FDR")]
+
+# Add Ensembl IDs as a column
+fusion_table$Ensembl_ID <- rownames(fusion_table)
+
+# Reorder columns
+fusion_table <- fusion_table[, c("Ensembl_ID", "SYMBOL", "logFC", "logCPM", "PValue", "FDR")]
+
+# Format values for report
+fusion_table$logFC <- round(fusion_table$logFC, 2)
+fusion_table$logCPM <- round(fusion_table$logCPM, 2)
+fusion_table$PValue <- format(fusion_table$PValue, scientific = TRUE, digits = 3)
+fusion_table$FDR <- format(fusion_table$FDR, scientific = TRUE, digits = 3)
+
+# Create report table
+knitr::kable(
+  fusion_table,
+  caption = "Table 3. Differential Expression Results of Fusion-Associated Genes",
+  col.names = c("Ensembl ID", "Gene", "logFC", "logCPM", "P-value", "FDR"),
+  align = "c"
+)
+```
+
+The differential expression analysis identified three fusion-associated genes reported in the original study as significantly different between TNBC and ER+ breast cancer samples. SCNN1A, IFITM10, and CTSD showed significant differential expression based on their low FDR values and all presented negative logFC values, indicating lower expression in TNBC relative to ER+ samples. Among these genes, SCNN1A showed the strongest differential expression signal. In contrast, TNFRSF1A was not identified as significantly differentially expressed under the selected filtering criteria.
+
+The absence of significant differential expression for TNFRSF1A may be related to the structure of the fusion transcripts described in the original study, where SCNN1A frequently appeared as the primary fusion partner fused to TNFRSF1A. Consequently, the expression signal may be more strongly associated with SCNN1A than with TNFRSF1A itself (Figure 1; Varley et al., 2014).
+
+Additionally, a logFC plot was generated to further evaluate whether the fusion-associated genes showed expression patterns more characteristic of ER+ or TNBC samples.
+
+```{r}
+# Horizontal diverging bar plot for fusion-associated genes
+ggplot(fusion_genes_de,
+       aes(x = reorder(SYMBOL, logFC),
+           y = logFC,
+           fill = logFC > 0)) +
+
+  geom_col() +
+
+  coord_flip() +
+
+  geom_hline(yintercept = 0,
+             linetype = "dashed",
+             color = "black") +
+
+  labs(
+    title = "Fig 43. Fusion-Associated Gene Expression",
+    x = "Gene",
+    y = "logFC (TNBC vs ER+)"
+  ) +
+
+  theme_bw() +
+
+  theme(legend.position = "none")
+```
+
+Although pathway-level analyses suggested stronger enrichment of proliferation, ribosome, and immune-associated biological processes in TNBC samples, several individual fusion-associated genes identified in the original study, including SCNN1A, IFITM10, and CTSD, showed relatively higher expression in ER+ samples. This indicates that individual fusion-associated genes do not necessarily follow the same overall expression trends observed at the pathway level.
+
+
+## KEGG Pathway Enrichment (ORA) for Genes Identified in Both Studies
+Next, the significantly differentially expressed genes (SCNN1A, IFITM10, and CTSD) were analyzed using ORA for KEGG pathway enrichment. ORA uses only the differentially expressed genes to identify enriched biological pathways.
+
+```{r}
+# Convert fusion-associated gene symbols into Entrez IDs because KEGG ORA results use Entrez gene identifiers
+fusion_entrez <- mapIds(org.Hs.eg.db,
+                        keys = fusion_genes,
+                        column = "ENTREZID",
+                        keytype = "SYMBOL",
+                        multiVals = "first")
+
+# Search enriched KEGG pathways containing the fusion-associated genes
+kegg_fusion_matches <- ora_kkeg_results[
+  sapply(ora_kkeg_results$geneID, function(x) {
+    any(unlist(strsplit(x, "/")) %in% fusion_entrez)
+  }),
+]
+
+# Extract relevant columns from the matching KEGG pathways
+kegg_fusion_matches <- kegg_fusion_matches[, c("Description",
+                                               "GeneRatio",
+                                               "Count",
+                                               "p.adjust",
+                                               "geneID")]
+
+# Display enriched KEGG pathways containing fusion-associated genes
+kegg_fusion_matches
+```
+
+```{r}
+# Create clean KEGG fusion pathway table
+fusion_pathway_table <- kegg_fusion_matches[, c("Description",
+                                                "GeneRatio",
+                                                "Count",
+                                                "p.adjust")]
+
+# Round adjusted p-values for readability
+fusion_pathway_table$p.adjust <- signif(fusion_pathway_table$p.adjust, 3)
+
+# Create formatted report table
+library(kableExtra)
+
+fusion_pathway_table %>%
+  knitr::kable(
+    caption = "Table 4. KEGG Pathways Containing Fusion-Associated Genes",
+    col.names = c("KEGG Pathway",
+                  "Gene Ratio",
+                  "Gene Count",
+                  "Adjusted P-value"),
+    align = "c",
+    booktabs = TRUE
+  ) %>%
+  kableExtra::kable_styling(
+    full_width = FALSE,
+    position = "center",
+    bootstrap_options = c("striped", "hover", "condensed")
+  )
+```
+
+
+The fusion-associated genes were linked to several cancer-related KEGG pathways, including Estrogen signaling, Autophagy, Apoptosis, and Sphingolipid signaling. However, unlike the broader enrichment analyses performed using the full transcriptomic dataset, these pathways did not remain statistically significant after multiple testing correction. This suggests that the fusion-associated genes may have more limited pathway-level enrichment when analyzed individually and may be biologically more relevant at the fusion transcript level rather than as independent genes.
+
+
+## GO Pathway Enrichment (ORA) for Genes Identified in Both Studies
+
+To further investigate whether genes involved in the recurrent fusion transcripts reported in the original study also contributed to enriched biological functions identified in the present analysis, the same fusion-associated genes examined in the KEGG analysis — SCNN1A, TNFRSF1A, CTSD, and IFITM10 — were searched within the significantly enriched GO Biological Process terms.
+
+Unlike the KEGG ORA results, which required Entrez gene identifiers for the search, the GO ORA results store gene symbols directly in the geneID column due to readable = TRUE being set during enrichGO(). Therefore, the search was performed using gene symbols directly, without requiring an additional identifier conversion step.
+
+```{r}
+# Search enriched GO Biological Processes containing
+# fusion-associated genes identified in the original paper
+
+go_fusion_matches <- ora_go_results[
+  sapply(ora_go_results$geneID, function(x) {
+    any(fusion_genes %in% unlist(strsplit(x, "/")))
+  }),
+]
+
+# Extract relevant GO columns
+go_fusion_matches <- go_fusion_matches[, c("Description",
+                                           "GeneRatio",
+                                           "Count",
+                                           "p.adjust",
+                                           "geneID")]
+
+# Display GO categories containing fusion-associated genes
+# go_fusion_matches
+```
+
+In parallel with the KEGG-based analysis, GO enrichment results were screened to assess whether fusion-associated genes identified in the original study were present within significantly enriched biological processes derived from the ORA analysis. In total, 57 GO Biological Process terms were identified to contain at least one fusion-associated gene, indicating that these genes are broadly distributed across multiple functional categories rather than being restricted to a single pathway.
+The top 10 GO Biological Process terms containing fusion-associated genes, ranked by adjusted p-value, are presented in the table below.
+
+```{r}
+# Select top 10 GO pathways based on adjusted p-value
+go_fusion_table <- go_fusion_matches %>%
+  
+  # Sort by adjusted p-value
+  arrange(p.adjust) %>%
+  
+  # Keep only top 10 pathways
+  head(10) %>%
+  
+  # Select relevant columns
+  dplyr::select(Description,
+                GeneRatio,
+                Count,
+                p.adjust)
+
+# Round adjusted p-values for readability
+go_fusion_table$p.adjust <- signif(go_fusion_table$p.adjust, 3)
+
+# Create formatted report table
+library(kableExtra)
+
+go_fusion_table %>%
+  knitr::kable(
+    caption = "Table 5. Top GO Biological Processes Containing Fusion-Associated Genes",
+    col.names = c("GO Biological Process",
+                  "Gene Ratio",
+                  "Gene Count",
+                  "Adjusted P-value"),
+    align = "c",
+    booktabs = TRUE
+  ) %>%
+  kableExtra::kable_styling(
+    full_width = FALSE,
+    position = "center",
+    bootstrap_options = c("striped", "hover", "condensed")
+  )
+```
+
+These GO terms were mainly associated with metabolic regulation, ion and fluid homeostasis, cellular signaling, and stress-response processes, suggesting a potential link between fusion-associated genes and pathways involved in cellular metabolism and proliferation.
+
+However, similar to the KEGG-based results, none of these GO terms remained statistically significant after multiple testing correction, suggesting that these findings should be interpreted as exploratory. Overall, the results indicate that fusion-associated genes are distributed across a wide range of biological processes, particularly those related to metabolism, homeostasis, and stress-response regulation.
+
+# Conclusion
+
+In conclusion, we analyzed the same dataset used in the original study to investigate the transcriptional differences between Triple Negative Breast Cancer (TNBC) and ER+ breast cancer samples. Exploratory analysis, normalization, differential expression analysis, and multiple enrichment approaches were performed to better understand the biological differences between the two subtypes. The MD plot (Figure 29) and volcano plot (Figure 30) showed clear differential expression patterns between ER+ and TNBC samples, with several genes significantly upregulated or downregulated relative to the ER+ reference group.
+
+The silhouette analysis (Figure 33) showed weak clustering between ER+ and TNBC samples, suggesting that although transcriptional differences exist, the two cancer subtypes still share relatively similar global gene expression profiles. Stronger clustering separation would likely be expected when comparing healthy tissue with cancer tissue rather than comparing two breast cancer subtypes.
+
+Enrichment analyses using limma camera, GSEA, and ORA with KEGG and GO databases consistently identified pathways related to ribosome activity, cell cycle regulation, immune-associated signaling, and inflammatory processes as major contributors to the transcriptomic differences between ER+ and TNBC samples. GSEA further suggested that many of these pathways were more strongly enriched in TNBC samples, indicating increased proliferative, protein synthesis, and immune-related activity compared to ER+ samples.
+
+Finally, fusion-associated genes reported in the original study were investigated individually. Three of the four genes examined (SCNN1A, IFITM10, and CTSD) were significantly differentially expressed and showed relatively higher expression in ER+ samples, while TNFRSF1A was not identified as significantly differentially expressed under the selected filtering criteria. KEGG pathway analysis of the fusion-associated genes identified several cancer-related pathways, including Estrogen signaling, Autophagy, Apoptosis, and Sphingolipid signaling. However, none of these pathways remained statistically significant after multiple testing correction, suggesting weaker pathway-level enrichment for the fusion-associated genes alone. Similarly, GO Biological Process enrichment of the fusion-associated genes identified their involvement across multiple biological functions. In addition, these associations did not reach statistical significance after multiple testing correction, suggesting weak independent gene-level effects.Overall, these findings suggest that fusion-associated genes may have greater biological relevance at the fusion transcript level rather than when analyzed individually, supporting the importance of further investigating RNA-level alterations in breast cancer.
